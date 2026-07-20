@@ -1,0 +1,17 @@
+Ambiente Virtual do Python
+venv/
+pycache/
+
+Arquivos compilados do Python
+*.pyc
+
+Arquivos de sistema do macOS
+.DS_Store
+
+Banco de dados SQLite e Backups
+IMPORTANTE: Nunca envie o banco de dados para o repositório.
+*.db
+*.db-journal
+.backup_
+
+

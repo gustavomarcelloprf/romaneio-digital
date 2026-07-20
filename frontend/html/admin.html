@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Admin — Romaneio Digital</title>
+    <link rel="stylesheet" href="../css/style.css" />
+  </head>
+  <body class="access">
+    <main class="access-shell">
+      <div class="container access-card" style="max-width: 800px;">
+        <h1>Painel de Administração</h1>
+
+        <div class="form-group grid">
+            <label>Seu Admin Token*<br>
+              <input id="adminToken" type="password" placeholder="Cole seu token aqui" required>
+            </label>
+        </div>
+        <button id="loadButton" class="btn-primary">Carregar Dados</button>
+
+        <hr>
+
+        <div id="adminMsg" class="msg" aria-live="polite"></div>
+        
+        <h3>Lojas Pendentes de Aprovação</h3>
+        <div id="pendingList">
+            <p class="muted">Nenhuma loja pendente carregada.</p>
+        </div>
+
+        <br>
+
+        <h3>Todas as Lojas Registradas</h3>
+        <div id="allStoresList">
+            <p class="muted">Nenhuma loja carregada.</p>
+        </div>
+
+      </div>
+    </main>
+
+    <script src="../js/admin.js"></script>
+  </body>
+</html>

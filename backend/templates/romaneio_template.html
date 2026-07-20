@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Romaneio #{{ pedido.id }}</title>
+    <style>
+        /* Estilos otimizados para WeasyPrint, baseados no seu design original */
+        @page {
+            size: A4;
+            margin: 1.5cm;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            font-size: 11pt;
+            color: #212529;
+            line-height: 1.6;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            border-bottom: 1.5px solid #212529;
+            padding-bottom: 15px;
+            margin-bottom: 25px;
+        }
+
+        .header h1 {
+            font-size: 26pt;
+            font-weight: 700;
+            margin: 0;
+        }
+
+        .header span {
+            font-size: 12pt;
+            color: #6c757d;
+        }
+
+        .details p {
+            margin: 0 0 4px;
+            color: #6c757d;
+        }
+
+        .details strong {
+            color: #212529;
+            font-weight: 600;
+        }
+
+        .items-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11pt;
+            margin-top: 30px;
+        }
+
+        .items-table th,
+        .items-table td {
+            padding: 10px 4px;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .items-table th {
+            text-align: left;
+            color: #6c757d;
+            font-weight: 700;
+            font-size: 10pt;
+            padding-bottom: 10px;
+            border-bottom: 1.5px solid #212529;
+        }
+        
+        .items-table tbody tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+
+        .text-right {
+            text-align: right;
+        }
+
+        .totals-wrapper {
+            margin-top: 30px;
+            display: flex;
+            justify-content: flex-end;
+        }
+
+        .totals-table {
+            width: 280px;
+            border-collapse: collapse;
+            font-size: 11pt;
+            color: #6c757d;
+        }
+
+        .totals-table td {
+            padding: 5px 0;
+        }
+        
+        .totals-table td:last-child {
+            text-align: right;
+            font-weight: 600;
+            color: #212529;
+        }
+        
+        .grand-total td {
+            font-weight: 700;
+            font-size: 14pt;
+            padding-top: 10px;
+            border-top: 1.5px solid #212529;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>{{ loja.get('nome', 'Nome da Loja') }}</h1>
+        <span>Romaneio #{{ pedido.id }}</span>
+    </div>
+
+    <div class="details">
+        <p>Data: <strong>{{ format_datetime(pedido.data_iso) }}</strong></p>
+        <p>Cliente: <strong>{{ pedido.cliente_nome }}</strong></p>
+        <p>Preço Unitário: <strong>{{ format_brl(pedido.preco_unitario) }} /kg</strong></p>
+        <p>Vendedor: <strong>{{ pedido.vendedor_nome or 'N/A' }}</strong></p>
+    </div>
+
+    <table class="items-table">
+        <thead>
+            <tr>
+                <th style="width: 40%;">Item</th>
+                <th style="width: 20%;">Cor</th>
+                <th style="width: 20%;" class="text-right">Subtotal (R$)</th>
+                <th style="width: 20%;" class="text-right">Peso (kg)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in itens %}
+            <tr>
+                <td>{{ pedido.tecido }}</td>
+                <td>{{ item.cor }}</td>
+                <td class="text-right">{{ format_brl(item.peso_kg * pedido.preco_unitario) }}</td>
+                <td class="text-right">{{ format_kg(item.peso_kg) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="totals-wrapper">
+        <table class="totals-table">
+            <tbody>
+                <tr>
+                    <td>Peso Total:</td>
+                    <td>{{ format_kg(peso_total) }} kg</td>
+                </tr>
+                <tr>
+                    <td>Subtotal:</td>
+                    <td>{{ format_brl(subtotal) }}</td>
+                </tr>
+                <tr>
+                    <td>Desconto:</td>
+                    <td>{{ format_brl(pedido.desconto) }}</td>
+                </tr>
+                <tr class="grand-total">
+                    <td>Total:</td>
+                    <td>{{ format_brl(pedido.total) }}</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>
+

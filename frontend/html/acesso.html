@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Acesso — Romaneio Digital</title>
+    <link rel="stylesheet" href="../css/style.css" />
+  </head>
+  <body class="access">
+    <!-- Shell centralizada -->
+    <main class="access-shell">
+      <div class="container access-card">
+        <h1 style="margin-bottom:16px">Acesso</h1>
+
+        <div id="msg" class="msg" aria-live="polite"></div>
+
+        <!-- LOGIN -->
+        <section id="viewLogin">
+          <h2>Entrar</h2>
+          <form id="formLogin" class="grid" style="margin-bottom:12px">
+            <label>Nome da loja *<br><input name="nome" required></label>
+            <label>Senha *<br><input name="senha" type="password" required></label>
+            <button type="submit">Entrar</button>
+          </form>
+          <p class="muted">Ainda não tem loja?
+            <a id="goSignup" href="#signup">Criar loja</a>
+          </p>
+        </section>
+
+        <!-- SIGNUP -->
+        <section id="viewSignup" hidden>
+          <h2>Cadastrar loja</h2>
+          <form id="formSignup" class="grid">
+            <label>Nome da loja *<br><input name="nome" required></label>
+            <label>Email<br><input name="email" type="email"></label>
+            <label>Telefone<br><input name="telefone"></label>
+            <label>Senha *<br><input name="senha" type="password" required></label>
+            <button type="submit">Cadastrar</button>
+          </form>
+          <p class="muted">Já tem conta?
+            <a id="goLogin" href="#login">Entrar</a>
+          </p>
+          <p class="muted" style="margin-top:6px">
+            O cadastro fica <strong>pendente de aprovação</strong> pelo administrador.
+          </p>
+        </section>
+      </div>
+    </main>
+
+    <noscript>Ative o JavaScript para usar o sistema.</noscript>
+    <!-- Importante: NÃO carregar script.js aqui -->
+    <script src="../js/acesso.js?v=6"></script>
+  </body>
+</html>
