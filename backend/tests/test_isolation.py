@@ -30,14 +30,23 @@ from app import app  # noqa: E402
 @pytest.fixture()
 def dados():
     """Banco limpo com loja A e loja B e dados básicos da loja A."""
+    # Reafirma o redirecionamento: outro módulo de teste pode ter trocado
+    # database.DB_PATH durante a coleta.
+    database.DB_PATH = str(_TMP_DB)
     _TMP_DB.unlink(missing_ok=True)
     database.init_db()
     conn = database.get_conn()
     cur = conn.cursor()
     for codigo in ("loja_a", "loja_b"):
         cur.execute(
-            "INSERT INTO lojas (codigo, nome, senha_hash, status) VALUES (?, ?, 'x', 'aprovado')",
+            "INSERT INTO lojas (codigo, nome, status) VALUES (?, ?, 'aprovado')",
             (codigo, codigo),
+        )
+        # Cada loja precisa de um usuário: a sessão agora carrega usuario_id
+        # e require_login revalida o usuário a cada request.
+        cur.execute(
+            "INSERT INTO usuarios (loja, nome, login, senha_hash, papel) VALUES (?, 'Dono', 'dono', 'x', 'admin')",
+            (codigo,),
         )
     cur.execute("INSERT INTO estoque_tecidos (nome_tecido, loja) VALUES ('Malha', 'loja_a')")
     tecido_a = cur.lastrowid
@@ -65,9 +74,16 @@ def dados():
 
 
 def _client(loja):
+    conn = database.get_conn()
+    usuario = conn.execute(
+        "SELECT id, papel FROM usuarios WHERE loja = ? LIMIT 1", (loja,)
+    ).fetchone()
+    conn.close()
     c = app.test_client()
     with c.session_transaction() as s:
         s["loja_codigo"] = loja
+        s["usuario_id"] = usuario["id"]
+        s["papel"] = usuario["papel"]
     return c
 
 

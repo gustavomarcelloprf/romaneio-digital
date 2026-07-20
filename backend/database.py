@@ -18,13 +18,14 @@ def init_db() -> None:
     conn = get_conn()
     cur = conn.cursor()
     
-    # --- Tabelas existentes (sem alterações) ---
+    # A loja segue como identidade do tenant, mas as credenciais de login
+    # agora vivem na tabela usuarios. senha_hash ficou nullable (legado).
     cur.execute("""
         CREATE TABLE IF NOT EXISTS lojas (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             codigo      TEXT UNIQUE,
             nome        TEXT NOT NULL,
-            senha_hash  TEXT NOT NULL,
+            senha_hash  TEXT,
             status      TEXT NOT NULL DEFAULT 'pendente',
             endereco    TEXT,
             pix_chave   TEXT,
@@ -32,6 +33,23 @@ def init_db() -> None:
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_lojas_codigo ON lojas(codigo)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja          TEXT NOT NULL,
+            nome          TEXT NOT NULL,
+            login         TEXT NOT NULL,
+            senha_hash    TEXT NOT NULL,
+            papel         TEXT NOT NULL DEFAULT 'operador' CHECK(papel IN ('admin','operador')),
+            taxa_comissao REAL NOT NULL DEFAULT 0,
+            ativo         INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (loja) REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE CASCADE,
+            UNIQUE(loja, login)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_loja ON usuarios(loja)")
     
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
@@ -134,6 +152,28 @@ def get_loja_by_codigo(codigo: str) -> Optional[Dict[str, Any]]:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT id, codigo, nome, endereco, pix_chave, senha_hash, status FROM lojas WHERE codigo=?", (codigo,))
+    row = cur.fetchone()
+    conn.close()
+    return _row_to_dict(row)
+
+def get_usuario(loja: str, login: str) -> Optional[Dict[str, Any]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, loja, nome, login, senha_hash, papel, taxa_comissao, ativo FROM usuarios WHERE loja=? AND login=?",
+        (loja, login),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return _row_to_dict(row)
+
+def get_usuario_by_id(usuario_id: int) -> Optional[Dict[str, Any]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, loja, nome, login, papel, taxa_comissao, ativo FROM usuarios WHERE id=?",
+        (usuario_id,),
+    )
     row = cur.fetchone()
     conn.close()
     return _row_to_dict(row)
