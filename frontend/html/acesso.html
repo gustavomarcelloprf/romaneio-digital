@@ -5,43 +5,101 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Acesso — Romaneio Digital</title>
     <link rel="stylesheet" href="../css/style.css" />
+    <!-- Estilos próprios da tela de acesso, carregados DEPOIS do style.css -->
+    <link rel="stylesheet" href="../css/acesso.css?v=1" />
   </head>
   <body class="access">
     <!-- Shell centralizada -->
     <main class="access-shell">
-      <div class="container access-card">
-        <h1 style="margin-bottom:16px">Acesso</h1>
+      <div class="access-card">
+        <header class="access-brand">
+          <div class="brand-mark" aria-hidden="true">RD</div>
+          <h1>Romaneio Digital</h1>
+          <p class="muted">Romaneios, estoque e vendas em um só lugar</p>
+        </header>
 
-        <div id="msg" class="msg" aria-live="polite"></div>
+        <!-- Alternância Entrar / Criar loja -->
+        <div class="access-tabs" role="tablist" aria-label="Entrar ou criar loja">
+          <button type="button" id="tabLogin" class="access-tab is-active"
+                  role="tab" aria-selected="true" aria-controls="viewLogin">Entrar</button>
+          <button type="button" id="tabSignup" class="access-tab"
+                  role="tab" aria-selected="false" aria-controls="viewSignup">Criar loja</button>
+        </div>
+
+        <div id="msg" class="msg" role="status" aria-live="polite"></div>
 
         <!-- LOGIN -->
-        <section id="viewLogin">
-          <h2>Entrar</h2>
-          <form id="formLogin" class="grid" style="margin-bottom:12px">
-            <label>Nome da loja *<br><input name="nome_loja" required></label>
-            <label>Login (usuário) *<br><input name="login" required autocomplete="username"></label>
-            <label>Senha *<br><input name="senha" type="password" required autocomplete="current-password"></label>
-            <button type="submit">Entrar</button>
+        <section id="viewLogin" role="tabpanel" aria-labelledby="tabLogin">
+          <form id="formLogin" novalidate>
+            <div class="field">
+              <label for="loginNomeLoja">Nome da loja *</label>
+              <input id="loginNomeLoja" name="nome_loja" required
+                     autocomplete="organization" placeholder="Ex.: Tecidos Central">
+              <p class="field-error"></p>
+            </div>
+            <div class="field">
+              <label for="loginLogin">Login (usuário) *</label>
+              <input id="loginLogin" name="login" required autocomplete="username">
+              <p class="field-error"></p>
+            </div>
+            <div class="field">
+              <label for="loginSenha">Senha *</label>
+              <div class="senha-wrap">
+                <input id="loginSenha" name="senha" type="password" required
+                       autocomplete="current-password">
+                <button type="button" class="toggle-senha"
+                        aria-label="Mostrar senha" aria-pressed="false">Mostrar</button>
+              </div>
+              <p class="field-error"></p>
+            </div>
+            <button type="submit" class="btn-primary btn-submit">
+              <span class="spinner" aria-hidden="true"></span>
+              <span class="btn-label">Entrar</span>
+            </button>
           </form>
-          <p class="muted">Ainda não tem loja?
+          <p class="access-alt muted">Ainda não tem loja?
             <a id="goSignup" href="#signup">Criar loja</a>
           </p>
         </section>
 
         <!-- SIGNUP -->
-        <section id="viewSignup" hidden>
-          <h2>Cadastrar loja</h2>
-          <form id="formSignup" class="grid">
-            <label>Nome da loja *<br><input name="nome_loja" required></label>
-            <label>Seu nome *<br><input name="nome" required></label>
-            <label>Login (usuário) *<br><input name="login" required autocomplete="username"></label>
-            <label>Senha *<br><input name="senha" type="password" required autocomplete="new-password"></label>
-            <button type="submit">Cadastrar</button>
+        <section id="viewSignup" hidden role="tabpanel" aria-labelledby="tabSignup">
+          <form id="formSignup" novalidate>
+            <div class="field">
+              <label for="signupNomeLoja">Nome da loja *</label>
+              <input id="signupNomeLoja" name="nome_loja" required
+                     autocomplete="organization" placeholder="Ex.: Tecidos Central">
+              <p class="field-error"></p>
+            </div>
+            <div class="field">
+              <label for="signupNome">Seu nome *</label>
+              <input id="signupNome" name="nome" required autocomplete="name">
+              <p class="field-error"></p>
+            </div>
+            <div class="field">
+              <label for="signupLogin">Login (usuário) *</label>
+              <input id="signupLogin" name="login" required autocomplete="username">
+              <p class="field-error"></p>
+            </div>
+            <div class="field">
+              <label for="signupSenha">Senha *</label>
+              <div class="senha-wrap">
+                <input id="signupSenha" name="senha" type="password" required
+                       autocomplete="new-password">
+                <button type="button" class="toggle-senha"
+                        aria-label="Mostrar senha" aria-pressed="false">Mostrar</button>
+              </div>
+              <p class="field-error"></p>
+            </div>
+            <button type="submit" class="btn-primary btn-submit">
+              <span class="spinner" aria-hidden="true"></span>
+              <span class="btn-label">Cadastrar</span>
+            </button>
           </form>
-          <p class="muted">Já tem conta?
+          <p class="access-alt muted">Já tem conta?
             <a id="goLogin" href="#login">Entrar</a>
           </p>
-          <p class="muted" style="margin-top:6px">
+          <p class="access-note muted">
             O cadastro fica <strong>pendente de aprovação</strong> pelo administrador.
           </p>
         </section>
@@ -50,6 +108,6 @@
 
     <noscript>Ative o JavaScript para usar o sistema.</noscript>
     <!-- Importante: NÃO carregar script.js aqui -->
-    <script src="../js/acesso.js?v=6"></script>
+    <script src="../js/acesso.js?v=7"></script>
   </body>
 </html>
