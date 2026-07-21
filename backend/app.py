@@ -4,7 +4,7 @@ import re
 import io
 import hmac
 import functools
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
 import sys
@@ -638,6 +638,150 @@ def update_cor_estoque(cor_id):
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
         conn.close()
+# -----------------------------------------------------------------------------
+# API: Relatórios (dashboards) — sempre escopados pela loja da sessão
+# -----------------------------------------------------------------------------
+def _periodo_from_args():
+    """Lê ?de=YYYY-MM-DD&ate=YYYY-MM-DD (default: últimos 30 dias).
+
+    Retorna (de, ate, ate_exclusivo): como data_iso é texto "YYYY-MM-DD HH:MM",
+    o filtro correto por string é de <= data_iso < ate + 1 dia, cobrindo o
+    fim do dia final sem depender de parsing de datas no SQLite.
+    """
+    def _parse(s):
+        try:
+            return datetime.strptime((s or "").strip(), "%Y-%m-%d")
+        except ValueError:
+            return None
+    hoje = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    dt_ate = _parse(request.args.get("ate")) or hoje
+    dt_de = _parse(request.args.get("de")) or (dt_ate - timedelta(days=30))
+    de = dt_de.strftime("%Y-%m-%d")
+    ate = dt_ate.strftime("%Y-%m-%d")
+    ate_exclusivo = (dt_ate + timedelta(days=1)).strftime("%Y-%m-%d")
+    return de, ate, ate_exclusivo
+
+@app.get("/api/relatorio/loja")
+@require_login
+@require_role("admin")
+def relatorio_loja():
+    loja = current_loja()
+    de, ate, ate_ex = _periodo_from_args()
+    conn = get_conn()
+    try:
+        tot = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat, COALESCE(SUM(comissao_valor), 0) AS com "
+            "FROM pedidos WHERE loja = ? AND data_iso >= ? AND data_iso < ?",
+            (loja, de, ate_ex),
+        ).fetchone()
+        num_pedidos = tot["n"]
+        faturamento_total = round(tot["fat"], 2)
+        comissao_total = round(tot["com"], 2)
+        ticket_medio = round(faturamento_total / num_pedidos, 2) if num_pedidos else 0.0
+
+        por_operador = [
+            {
+                "usuario_id": r["usuario_id"],
+                "nome": r["nome"],
+                "num_pedidos": r["num_pedidos"],
+                "faturamento": round(r["faturamento"], 2),
+                "comissao": round(r["comissao"], 2),
+            }
+            for r in conn.execute(
+                "SELECT p.usuario_id, COALESCE(u.nome, '') AS nome, COUNT(*) AS num_pedidos, "
+                "COALESCE(SUM(p.total), 0) AS faturamento, COALESCE(SUM(p.comissao_valor), 0) AS comissao "
+                "FROM pedidos p LEFT JOIN usuarios u ON u.id = p.usuario_id "
+                "WHERE p.loja = ? AND p.data_iso >= ? AND p.data_iso < ? "
+                "GROUP BY p.usuario_id ORDER BY faturamento DESC",
+                (loja, de, ate_ex),
+            ).fetchall()
+        ]
+
+        tecidos = [
+            {
+                "tecido": r["tecido"],
+                "faturamento": round(r["faturamento"], 2),
+                "peso_total": round(r["peso_total"], 2),
+            }
+            for r in conn.execute(
+                "SELECT p.tecido, COALESCE(SUM(p.total), 0) AS faturamento, "
+                "COALESCE((SELECT SUM(i.peso_kg) FROM itens_pedido i "
+                "          JOIN pedidos p2 ON p2.id = i.pedido_id "
+                "          WHERE p2.loja = ? AND p2.tecido = p.tecido "
+                "            AND p2.data_iso >= ? AND p2.data_iso < ?), 0) AS peso_total "
+                "FROM pedidos p "
+                "WHERE p.loja = ? AND p.data_iso >= ? AND p.data_iso < ? "
+                "GROUP BY p.tecido ORDER BY faturamento DESC",
+                (loja, de, ate_ex, loja, de, ate_ex),
+            ).fetchall()
+        ]
+
+        encalhados = [
+            r["nome_tecido"]
+            for r in conn.execute(
+                "SELECT nome_tecido FROM estoque_tecidos "
+                "WHERE loja = ? AND nome_tecido NOT IN ("
+                "  SELECT DISTINCT tecido FROM pedidos "
+                "  WHERE loja = ? AND data_iso >= ? AND data_iso < ? AND tecido IS NOT NULL"
+                ") ORDER BY nome_tecido",
+                (loja, loja, de, ate_ex),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    return jsonify(
+        periodo={"de": de, "ate": ate},
+        faturamento_total=faturamento_total,
+        num_pedidos=num_pedidos,
+        ticket_medio=ticket_medio,
+        comissao_total=comissao_total,
+        por_operador=por_operador,
+        tecidos_mais_vendidos=tecidos[:5],
+        tecidos_menos_vendidos=sorted(tecidos, key=lambda t: t["faturamento"])[:5],
+        tecidos_encalhados=encalhados,
+    )
+
+@app.get("/api/relatorio/meu")
+@require_login
+def relatorio_meu():
+    loja = current_loja()
+    usuario_id = session.get("usuario_id")
+    de, ate, ate_ex = _periodo_from_args()
+    conn = get_conn()
+    try:
+        tot = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat, COALESCE(SUM(comissao_valor), 0) AS com "
+            "FROM pedidos WHERE loja = ? AND usuario_id = ? AND data_iso >= ? AND data_iso < ?",
+            (loja, usuario_id, de, ate_ex),
+        ).fetchone()
+        ultimos = [
+            {
+                "id": r["id"],
+                "data_iso": r["data_iso"],
+                "cliente_nome": r["cliente_nome"],
+                "total": round(r["total"] or 0, 2),
+                "comissao_valor": round(r["comissao_valor"] or 0, 2),
+            }
+            for r in conn.execute(
+                "SELECT p.id, p.data_iso, COALESCE(c.nome, '') AS cliente_nome, p.total, p.comissao_valor "
+                "FROM pedidos p LEFT JOIN clientes c ON c.id = p.cliente_id "
+                "WHERE p.loja = ? AND p.usuario_id = ? AND p.data_iso >= ? AND p.data_iso < ? "
+                "ORDER BY p.id DESC LIMIT 10",
+                (loja, usuario_id, de, ate_ex),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    return jsonify(
+        periodo={"de": de, "ate": ate},
+        num_pedidos=tot["n"],
+        faturamento=round(tot["fat"], 2),
+        comissao=round(tot["com"], 2),
+        ultimos_pedidos=ultimos,
+    )
+
 # -----------------------------------------------------------------------------
 # API: PIX e Exportações
 # -----------------------------------------------------------------------------

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Romaneio Digital</title>
     <!-- A versão foi incrementada para forçar a atualização do cache dos arquivos CSS/JS -->
-    <link rel="stylesheet" href="../css/style.css?v=31" />
+    <link rel="stylesheet" href="../css/style.css?v=32" />
 </head>
 <body>
     <div class="container">
@@ -17,6 +17,42 @@
             </h1>
             <button id="logoutBtn" class="btn-secondary">Sair</button>
         </header>
+
+        <!-- Dashboard da loja (visível somente para admin) -->
+        <section class="card" id="dashboardSection" hidden>
+            <h2>Dashboard</h2>
+            <div class="periodo-bar" data-relatorio-periodo>
+                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="hoje">Hoje</button>
+                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="7d">7 dias</button>
+                <button type="button" class="btn-secondary btn-sm periodo-btn is-active" data-preset="30d">30 dias</button>
+                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="mes">Este mês</button>
+                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
+            </div>
+            <div id="dashCards" class="dash-cards"></div>
+            <h3>Por operador</h3>
+            <div id="dashOperadoresWrap" class="table-responsive"></div>
+            <h3>Tecidos mais vendidos</h3>
+            <div id="dashMaisWrap" class="table-responsive"></div>
+            <h3>Tecidos menos vendidos</h3>
+            <div id="dashMenosWrap" class="table-responsive"></div>
+            <h3>Encalhados no período</h3>
+            <div id="dashEncalhadosWrap"></div>
+        </section>
+
+        <!-- Minhas Vendas (todos os papéis) -->
+        <section class="card" id="minhasVendasSection">
+            <h2>Minhas Vendas</h2>
+            <div class="periodo-bar" data-relatorio-periodo>
+                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="hoje">Hoje</button>
+                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="7d">7 dias</button>
+                <button type="button" class="btn-secondary btn-sm periodo-btn is-active" data-preset="30d">30 dias</button>
+                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="mes">Este mês</button>
+                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
+            </div>
+            <div id="meuCards" class="dash-cards"></div>
+            <h3>Meus últimos pedidos</h3>
+            <div id="meusPedidosWrap" class="table-responsive"></div>
+        </section>
 
         <!-- Seção Novo Pedido -->
         <section class="card">
@@ -178,7 +214,7 @@
     </div>
 
     <noscript>Ative o JavaScript para usar o sistema.</noscript>
-    <script src="../js/script.js?v=31"></script>
+    <script src="../js/script.js?v=32"></script>
 </body>
 </html>
 

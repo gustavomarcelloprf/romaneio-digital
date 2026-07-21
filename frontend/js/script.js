@@ -8,7 +8,8 @@
         novoPedido: { itens: [] },
         pedidoEmEdicao: { id: null, itens: [] },
         loja: sessionStorage.getItem("loja_codigo") || "",
-        me: null
+        me: null,
+        periodo: "30d"
     };
 
     // --- Funções Utilitárias ---
@@ -27,6 +28,32 @@
 
     function fmtBRL(n) {
         return (n || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+    }
+
+    function fmtDataBR(iso) {
+        const d = new Date(iso);
+        return isNaN(d) ? String(iso || '') : d.toLocaleString('pt-BR');
+    }
+
+    function isoDate(d) {
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    }
+
+    // Converte o preset selecionado (Hoje, 7d, 30d, mês, tudo) na querystring
+    // ?de=YYYY-MM-DD&ate=YYYY-MM-DD esperada pelos endpoints de relatório.
+    function periodoQuery() {
+        const hoje = new Date();
+        const ate = isoDate(hoje);
+        let de;
+        switch (state.periodo) {
+            case 'hoje': de = ate; break;
+            case '7d': { const d = new Date(hoje); d.setDate(d.getDate() - 7); de = isoDate(d); break; }
+            case 'mes': de = `${ate.slice(0, 7)}-01`; break;
+            case 'tudo': de = '1970-01-01'; break;
+            default: { const d = new Date(hoje); d.setDate(d.getDate() - 30); de = isoDate(d); break; }
+        }
+        return `de=${de}&ate=${ate}`;
     }
 
     async function jfetch(url, opts = {}) {
@@ -135,10 +162,119 @@
         state.me = me;
         const userBadge = $("#userBadge");
         if (userBadge) userBadge.textContent = `${me.nome} (${me.papel})`;
-        // A seção de Usuários só existe para o admin da loja.
+        // A seção de Usuários e o Dashboard da loja só existem para o admin.
         if (me.papel === "admin") {
             $("#usuariosSection")?.removeAttribute("hidden");
+            $("#dashboardSection")?.removeAttribute("hidden");
             await loadUsuarios();
+        }
+    }
+
+    // --- Dashboards (Fase 1) ---
+    function statCard(label, value) {
+        return `<div class="stat-card"><span class="stat-label">${esc(label)}</span><span class="stat-value">${esc(value)}</span></div>`;
+    }
+
+    // Barra proporcional feita só com divs/CSS (sem libs de gráfico).
+    function barCell(valor, maximo) {
+        const pct = maximo > 0 ? Math.max(2, Math.round((valor / maximo) * 100)) : 0;
+        return `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>`;
+    }
+
+    function tabelaTecidos(lista) {
+        if (!lista.length) return '<p class="muted" style="padding:12px;">Nenhuma venda no período.</p>';
+        const max = Math.max(...lista.map(t => t.faturamento || 0));
+        return `
+            <table class="table">
+                <thead><tr><th>Tecido</th><th>Faturamento</th><th>Peso (kg)</th><th></th></tr></thead>
+                <tbody>${lista.map(t => `
+                    <tr>
+                        <td>${esc(t.tecido)}</td>
+                        <td>${fmtBRL(t.faturamento)}</td>
+                        <td>${esc(numberToPtbr(t.peso_total))}</td>
+                        <td>${barCell(t.faturamento || 0, max)}</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>`;
+    }
+
+    function renderDashboardLoja(rel) {
+        const cards = $("#dashCards");
+        if (cards) {
+            cards.innerHTML =
+                statCard("Faturamento", fmtBRL(rel.faturamento_total)) +
+                statCard("Pedidos", rel.num_pedidos) +
+                statCard("Ticket médio", fmtBRL(rel.ticket_medio)) +
+                statCard("Comissão total", fmtBRL(rel.comissao_total));
+        }
+        const opWrap = $("#dashOperadoresWrap");
+        if (opWrap) {
+            const ops = rel.por_operador || [];
+            const max = Math.max(...ops.map(o => o.faturamento || 0), 0);
+            opWrap.innerHTML = ops.length ? `
+                <table class="table">
+                    <thead><tr><th>Operador</th><th>Pedidos</th><th>Faturamento</th><th>Comissão</th><th></th></tr></thead>
+                    <tbody>${ops.map(o => `
+                        <tr>
+                            <td>${esc(o.nome)}</td>
+                            <td>${esc(o.num_pedidos)}</td>
+                            <td>${fmtBRL(o.faturamento)}</td>
+                            <td>${fmtBRL(o.comissao)}</td>
+                            <td>${barCell(o.faturamento || 0, max)}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>` : '<p class="muted" style="padding:12px;">Nenhum pedido no período.</p>';
+        }
+        const maisWrap = $("#dashMaisWrap");
+        if (maisWrap) maisWrap.innerHTML = tabelaTecidos(rel.tecidos_mais_vendidos || []);
+        const menosWrap = $("#dashMenosWrap");
+        if (menosWrap) menosWrap.innerHTML = tabelaTecidos(rel.tecidos_menos_vendidos || []);
+        const encWrap = $("#dashEncalhadosWrap");
+        if (encWrap) {
+            const enc = rel.tecidos_encalhados || [];
+            encWrap.innerHTML = enc.length
+                ? `<div class="tag-list">${enc.map(t => `<span class="pill">${esc(t)}</span>`).join('')}</div>`
+                : '<p class="muted">Nenhum tecido encalhado: tudo em estoque vendeu no período.</p>';
+        }
+    }
+
+    function renderMinhasVendas(rel) {
+        const cards = $("#meuCards");
+        if (cards) {
+            cards.innerHTML =
+                statCard("Faturamento", fmtBRL(rel.faturamento)) +
+                statCard("Pedidos", rel.num_pedidos) +
+                statCard("Comissão", fmtBRL(rel.comissao));
+        }
+        const wrap = $("#meusPedidosWrap");
+        if (wrap) {
+            const pedidos = rel.ultimos_pedidos || [];
+            wrap.innerHTML = pedidos.length ? `
+                <table class="table">
+                    <thead><tr><th>ID</th><th>Data</th><th>Cliente</th><th>Total</th><th>Comissão</th></tr></thead>
+                    <tbody>${pedidos.map(p => `
+                        <tr>
+                            <td>${esc(p.id)}</td>
+                            <td>${esc(fmtDataBR(p.data_iso))}</td>
+                            <td>${esc(p.cliente_nome)}</td>
+                            <td>${fmtBRL(p.total)}</td>
+                            <td>${fmtBRL(p.comissao_valor)}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>` : '<p class="muted" style="padding:12px;">Nenhum pedido seu no período.</p>';
+        }
+    }
+
+    async function loadRelatorios() {
+        const qs = periodoQuery();
+        try {
+            const promessas = [jfetch(`/api/relatorio/meu?${qs}`)];
+            if (state.me?.papel === "admin") promessas.push(jfetch(`/api/relatorio/loja?${qs}`));
+            const [meu, loja] = await Promise.all(promessas);
+            if (meu) renderMinhasVendas(meu);
+            if (loja) renderDashboardLoja(loja);
+        } catch (err) {
+            console.error("Erro ao carregar relatórios:", err);
         }
     }
 
@@ -256,11 +392,13 @@
     async function loadInitialData() {
         $("#lojaBadge").textContent = state.loja;
         try {
+            // loadMe primeiro: os relatórios dependem do papel do usuário.
+            await loadMe();
             await Promise.all([
-                loadMe(),
                 loadClients(),
                 loadOrders(),
-                loadStock()
+                loadStock(),
+                loadRelatorios()
             ]);
         } catch (err) {
             alert(`Erro ao carregar dados: ${err.message}`);
@@ -309,6 +447,19 @@
         const editModal = $("#editModal");
         const estoqueWrap = $("#estoqueWrap");
         const formAddTecido = $("#formAddTecido");
+
+        // Presets de período dos relatórios: um clique atualiza AMBAS as barras
+        // (Dashboard e Minhas Vendas) e recarrega os dois relatórios.
+        document.querySelectorAll("[data-relatorio-periodo]").forEach(bar => {
+            bar.addEventListener("click", e => {
+                const btn = e.target.closest(".periodo-btn");
+                if (!btn) return;
+                state.periodo = btn.dataset.preset;
+                document.querySelectorAll(".periodo-btn").forEach(b =>
+                    b.classList.toggle("is-active", b.dataset.preset === state.periodo));
+                loadRelatorios();
+            });
+        });
 
         logoutBtn?.addEventListener("click", async () => {
             await jfetch("/auth/logout", { method: "POST" });
@@ -384,6 +535,7 @@
                 renderItens(state.novoPedido.itens, itensWrap, 'remove-item');
                 updateTotalPreview(state.novoPedido.itens, inpPreco, inpDesconto, totalPreviewEl);
                 loadOrders();
+                loadRelatorios();
                 if (payload.descontar_estoque) loadStock();
                 alert('Pedido salvo com sucesso!');
             } catch (err) { alert(`Erro ao salvar pedido: ${err.message}`); }
@@ -465,6 +617,7 @@
                     try {
                         await jfetch(`/pedidos/${pedidoId}`, { method: 'DELETE' });
                         loadOrders();
+                        loadRelatorios();
                     } catch (err) { alert(`Erro: ${err.message}`); }
                 }
             }
@@ -594,6 +747,7 @@
                     await jfetch(`/pedidos/${pedidoId}`, { method: 'PUT', body: JSON.stringify(payload) });
                     closeEditModal();
                     loadOrders();
+                    loadRelatorios();
                     alert('Pedido atualizado com sucesso!');
                 } catch (err) { alert(`Erro ao atualizar pedido: ${err.message}`); }
             });
