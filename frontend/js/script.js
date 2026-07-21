@@ -4,10 +4,11 @@
     function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
     // --- Estado da Aplicação ---
-    const state = { 
+    const state = {
         novoPedido: { itens: [] },
         pedidoEmEdicao: { id: null, itens: [] },
-        loja: sessionStorage.getItem("loja_codigo") || ""
+        loja: sessionStorage.getItem("loja_codigo") || "",
+        me: null
     };
 
     // --- Funções Utilitárias ---
@@ -128,30 +129,43 @@
         }
     }
     
-    async function loadSellers() {
-        const vendedores = await jfetch("/vendedores");
-        if (Array.isArray(vendedores)) {
-            const optionsHtml = '<option value="">Selecione...</option>' + vendedores.map(v => `<option value="${v.id}">${esc(v.nome)}</option>`).join("");
-            $("#vendedorId").innerHTML = optionsHtml;
-            $("#editVendedorId").innerHTML = optionsHtml;
-            
-            const vendedoresWrap = $("#vendedoresWrap");
-            if (vendedoresWrap) {
-                vendedoresWrap.innerHTML = vendedores.length ? `
-                    <table class="table">
-                        <thead><tr><th>Nome</th><th>Ação</th></tr></thead>
-                        <tbody>
-                            ${vendedores.map(v => `
-                                <tr>
-                                    <td>${esc(v.nome)}</td>
-                                    <td class="actions"><button class="btn-secondary btn-danger btn-sm remove-vendedor-btn" data-id="${v.id}">Remover</button></td>
-                                </tr>
-                            `).join('')}
-                        </tbody>
-                    </table>
-                ` : '<p class="muted">Nenhum vendedor cadastrado.</p>';
-            }
+    async function loadMe() {
+        const me = await jfetch("/me");
+        if (!me) return;
+        state.me = me;
+        const userBadge = $("#userBadge");
+        if (userBadge) userBadge.textContent = `${me.nome} (${me.papel})`;
+        // A seção de Usuários só existe para o admin da loja.
+        if (me.papel === "admin") {
+            $("#usuariosSection")?.removeAttribute("hidden");
+            await loadUsuarios();
         }
+    }
+
+    async function loadUsuarios() {
+        const usuarios = await jfetch("/usuarios");
+        const usuariosWrap = $("#usuariosWrap");
+        if (!usuariosWrap || !Array.isArray(usuarios)) return;
+        usuariosWrap.innerHTML = usuarios.length ? `
+            <table class="table">
+                <thead><tr><th>Nome</th><th>Login</th><th>Papel</th><th>Comissão (%)</th><th>Status</th><th>Ações</th></tr></thead>
+                <tbody>
+                    ${usuarios.map(u => `
+                        <tr>
+                            <td>${esc(u.nome)}</td>
+                            <td>${esc(u.login)}</td>
+                            <td>${esc(u.papel)}</td>
+                            <td>${esc(numberToPtbr(u.taxa_comissao))}</td>
+                            <td>${u.ativo ? 'Ativo' : '<span class="muted">Inativo</span>'}</td>
+                            <td class="actions">
+                                <button class="btn-secondary btn-sm edit-usuario-btn" data-id="${esc(u.id)}" data-nome="${esc(u.nome)}" data-taxa="${esc(u.taxa_comissao)}">Editar taxa</button>
+                                <button class="btn-secondary btn-sm toggle-usuario-btn ${u.ativo ? 'btn-danger' : ''}" data-id="${esc(u.id)}" data-ativo="${u.ativo ? 1 : 0}">${u.ativo ? 'Desativar' : 'Ativar'}</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        ` : '<p class="muted">Nenhum usuário cadastrado.</p>';
     }
 
     async function loadOrders() {
@@ -164,13 +178,15 @@
             if (pedidosWrap) {
                 pedidosWrap.innerHTML = pedidos.length ? `
             <table class="table">
-                <thead><tr><th>ID</th><th>Cliente</th><th>Data</th><th>Total</th><th>Ações</th></tr></thead>
+                <thead><tr><th>ID</th><th>Cliente</th><th>Vendedor</th><th>Data</th><th>Total</th><th>Comissão</th><th>Ações</th></tr></thead>
                 <tbody>${pedidos.map(p => `
                     <tr>
                         <td>${p.id}</td>
                         <td>${esc(p.cliente_nome)}</td>
+                        <td>${esc(p.vendedor_nome || '')}</td>
                         <td>${new Date(p.data_iso).toLocaleString('pt-BR')}</td>
                         <td>${fmtBRL(p.total)}</td>
+                        <td>${fmtBRL(p.comissao_valor)}</td>
                         <td class="actions">
                             <button class="btn-secondary btn-sm edit-pedido-btn" data-id="${p.id}">Editar</button>
                             <button class="btn-secondary btn-danger btn-sm remove-pedido-btn" data-id="${p.id}">Remover</button>
@@ -241,9 +257,9 @@
         $("#lojaBadge").textContent = state.loja;
         try {
             await Promise.all([
+                loadMe(),
                 loadClients(),
                 loadOrders(),
-                loadSellers(),
                 loadStock()
             ]);
         } catch (err) {
@@ -261,8 +277,6 @@
             state.pedidoEmEdicao.itens = itens.map(it => ({ cor: it.cor, peso: it.peso_kg }));
     
             $("#editClienteId").value = pedido.cliente_id;
-            $("#editVendedorId").value = pedido.vendedor_id;
-            
             $("#editTecido").value = pedido.tecido;
             $("#editPreco").value = numberToPtbr(pedido.preco_unitario);
             $("#editDesconto").value = numberToPtbr(pedido.desconto);
@@ -286,9 +300,9 @@
 
     // ===== Event Listeners =====
     document.addEventListener("DOMContentLoaded", () => {
-        const formPix = $("#formPix"), formCliente = $("#formCliente"), formVendedor = $("#formVendedor");
+        const formPix = $("#formPix"), formCliente = $("#formCliente"), formUsuario = $("#formUsuario");
         const formPedido = $("#formPedido"), pedidosWrap = $("#pedidosWrap"), clientesWrap = $("#clientesWrap");
-        const vendedoresWrap = $("#vendedoresWrap"), clienteSearchInput = $("#clienteSearch"), orderSortSelect = $("#orderSort");
+        const usuariosWrap = $("#usuariosWrap"), clienteSearchInput = $("#clienteSearch"), orderSortSelect = $("#orderSort");
         const inpPreco = $("#preco"), inpDesconto = $("#desconto"), totalPreviewEl = $("#totalPreview");
         const btnAddItem = $("#btnAddItem"), itensWrap = $("#itensWrap");
         const logoutBtn = $("#logoutBtn");
@@ -314,22 +328,51 @@
             } catch (err) { alert(err.message); }
         });
       
-        formVendedor?.addEventListener("submit", async e => {
+        formUsuario?.addEventListener("submit", async e => {
             e.preventDefault();
-            const data = { nome: e.target.elements.nome.value.trim() };
-            if (!data.nome) return;
+            const data = Object.fromEntries(new FormData(e.target).entries());
+            const msgEl = $("#usuarioMsg");
             try {
-                await jfetch("/vendedores", { method: "POST", body: JSON.stringify(data) });
+                await jfetch("/usuarios", { method: "POST", body: JSON.stringify(data) });
                 e.target.reset();
-                loadSellers();
-            } catch (err) { alert(err.message); }
+                if (msgEl) msgEl.textContent = "Operador criado com sucesso!";
+                loadUsuarios();
+            } catch (err) {
+                if (msgEl) msgEl.textContent = `Erro: ${err.message}`;
+            }
+        });
+
+        usuariosWrap?.addEventListener('click', async e => {
+            const btn = e.target.closest('button');
+            if (!btn) return;
+            const usuarioId = btn.dataset.id;
+            if (!usuarioId) return;
+
+            if (btn.classList.contains('edit-usuario-btn')) {
+                const taxaAtual = numberToPtbr(parseFloat(btn.dataset.taxa));
+                const novaTaxaStr = prompt(`Nova taxa de comissão (%) para "${btn.dataset.nome}":\n\n(A mudança vale só para pedidos NOVOS; os anteriores mantêm a comissão congelada.)`, taxaAtual);
+                if (novaTaxaStr === null) return;
+                const novaTaxa = ptbrToNumber(novaTaxaStr);
+                if (novaTaxa === null || novaTaxa < 0) return alert('Taxa inválida.');
+                try {
+                    await jfetch(`/usuarios/${usuarioId}`, { method: 'PUT', body: JSON.stringify({ taxa_comissao: novaTaxa }) });
+                    loadUsuarios();
+                } catch (err) { alert(`Erro: ${err.message}`); }
+            } else if (btn.classList.contains('toggle-usuario-btn')) {
+                const ativar = btn.dataset.ativo !== '1';
+                if (!ativar && !confirm('Desativar este usuário? Ele não conseguirá mais entrar no sistema.')) return;
+                try {
+                    await jfetch(`/usuarios/${usuarioId}`, { method: 'PUT', body: JSON.stringify({ ativo: ativar ? 1 : 0 }) });
+                    loadUsuarios();
+                } catch (err) { alert(`Erro: ${err.message}`); }
+            }
         });
 
         formPedido?.addEventListener("submit", async e => {
             e.preventDefault();
             if (state.novoPedido.itens.length === 0) return alert("Adicione pelo menos um item ao pedido.");
             const payload = {
-                cliente_id: $("#clienteId").value, vendedor_id: $("#vendedorId").value,
+                cliente_id: $("#clienteId").value,
                 tecido: $("#tecido").value, preco_unitario: $("#preco").value,
                 desconto: $("#desconto").value, itens: state.novoPedido.itens,
                 descontar_estoque: $("#descontar_estoque").checked
@@ -405,16 +448,6 @@
                 } catch (err) {
                     alert(`Erro ao atualizar cliente: ${err.message}`);
                 }
-            }
-        });
-
-        vendedoresWrap?.addEventListener('click', async e => {
-            const btn = e.target.closest('.remove-vendedor-btn');
-            if (btn && confirm('Tem certeza?')) {
-                try {
-                    await jfetch(`/vendedores/${btn.dataset.id}`, { method: 'DELETE' });
-                    loadSellers();
-                } catch (err) { alert(`Erro: ${err.message}`); }
             }
         });
 
@@ -552,7 +585,7 @@
                 const pedidoId = state.pedidoEmEdicao.id;
                 if (!pedidoId) return;
                 const payload = {
-                    cliente_id: $("#editClienteId").value, vendedor_id: $("#editVendedorId").value,
+                    cliente_id: $("#editClienteId").value,
                     tecido: $("#editTecido").value, preco_unitario: $("#editPreco").value,
                     desconto: $("#editDesconto").value, itens: state.pedidoEmEdicao.itens,
                 };

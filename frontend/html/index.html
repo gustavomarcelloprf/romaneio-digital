@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Romaneio Digital</title>
     <!-- A versão foi incrementada para forçar a atualização do cache dos arquivos CSS/JS -->
-    <link rel="stylesheet" href="../css/style.css?v=30" />
+    <link rel="stylesheet" href="../css/style.css?v=31" />
 </head>
 <body>
     <div class="container">
@@ -13,6 +13,7 @@
             <h1 class="app-title">
                 Romaneio Digital
                 <span id="lojaBadge" class="pill"></span>
+                <span id="userBadge" class="pill"></span>
             </h1>
             <button id="logoutBtn" class="btn-secondary">Sair</button>
         </header>
@@ -23,7 +24,6 @@
             <form id="formPedido">
                 <div class="grid">
                     <div class="form-group"><label>Cliente *<select id="clienteId" name="cliente_id" required></select></label></div>
-                    <div class="form-group"><label>Vendedor<select id="vendedorId" name="vendedor_id"></select></label></div>
                     <div class="form-group"><label>Tecido *<input id="tecido" name="tecido" required placeholder="Nome exato do tecido em estoque"></label></div>
                     <div class="form-group"><label>Preço unitário (R$/kg) *<input id="preco" name="preco_unitario" inputmode="decimal" placeholder="Ex.: 25,90" required></label></div>
                     <div class="form-group" style="grid-column: 1 / -1;"><label>Desconto (R$)<input id="desconto" name="desconto" placeholder="0,00" type="text"></label></div>
@@ -82,13 +82,24 @@
                 <div class="form-group"><label>Email<input name="email" type="email"></label></div>
                 <button type="submit" class="btn-primary" style="grid-column: 1 / -1;">Salvar Cliente</button>
             </form>
-            <hr class="divider">
-            <!-- Novo Vendedor -->
-            <h3>Novo Vendedor</h3>
-            <form id="formVendedor">
+        </section>
+
+        <!-- Seção Usuários (visível somente para admin; o vendedor de um
+             pedido é sempre o usuário logado) -->
+        <section class="card" id="usuariosSection" hidden>
+            <h2>Usuários</h2>
+            <h3>Novo Operador</h3>
+            <form id="formUsuario" class="grid">
                 <div class="form-group"><label>Nome *<input name="nome" required></label></div>
-                <button type="submit" class="btn-primary">Salvar Vendedor</button>
+                <div class="form-group"><label>Login *<input name="login" required autocomplete="off"></label></div>
+                <div class="form-group"><label>Senha *<input name="senha" type="password" required autocomplete="new-password"></label></div>
+                <div class="form-group"><label>Comissão (%)<input name="taxa_comissao" inputmode="decimal" placeholder="Ex.: 2,5"></label></div>
+                <button type="submit" class="btn-primary" style="grid-column: 1 / -1;">Criar Operador</button>
             </form>
+            <div id="usuarioMsg" class="msg"></div>
+            <hr class="divider">
+            <h3>Equipe</h3>
+            <div id="usuariosWrap" class="table-responsive"></div>
         </section>
 
         <!-- Seção de Listagens -->
@@ -110,9 +121,6 @@
             <h3>Clientes Registrados</h3>
             <div class="form-group"><input type="search" id="clienteSearch" placeholder="Buscar cliente por nome..."></div>
             <div id="clientesWrap" class="table-responsive"></div>
-
-            <h3>Vendedores Registrados</h3>
-            <div id="vendedoresWrap" class="table-responsive"></div>
         </section>
 
         <!-- Seção Configurações -->
@@ -138,7 +146,6 @@
             <form id="formEditPedido">
                 <div class="grid">
                     <div class="form-group"><label>Cliente *<select id="editClienteId" name="cliente_id" required></select></label></div>
-                    <div class="form-group"><label>Vendedor<select id="editVendedorId" name="vendedor_id"></select></label></div>
                     <div class="form-group"><label>Tecido *<input id="editTecido" name="tecido" required></label></div>
                     <div class="form-group"><label>Preço unitário (R$/kg) *<input id="editPreco" name="preco_unitario" inputmode="decimal" required></label></div>
                     <div class="form-group" style="grid-column: 1 / -1;"><label>Desconto (R$)<input id="editDesconto" name="desconto" type="text"></label></div>
@@ -171,7 +178,7 @@
     </div>
 
     <noscript>Ative o JavaScript para usar o sistema.</noscript>
-    <script src="../js/script.js?v=30"></script>
+    <script src="../js/script.js?v=31"></script>
 </body>
 </html>
 
