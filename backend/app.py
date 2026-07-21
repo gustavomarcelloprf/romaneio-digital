@@ -22,7 +22,8 @@ from flask_limiter.util import get_remote_address
 # --- Módulos do Projeto (Romaneio Digital) ---
 from database import (
     init_db, get_conn, salvar_pix_by_codigo,
-    get_pedido, get_itens_pedido, get_loja_by_codigo
+    get_pedido, get_itens_pedido, get_loja_by_codigo,
+    get_usuario, get_usuario_by_id
 )
 from services.render_png import render_pedido_png
 from services.render_pdf import render_pedido_pdf
@@ -66,14 +67,29 @@ def require_login(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         loja_codigo = current_loja()
-        if not loja_codigo:
+        usuario_id = session.get("usuario_id")
+        if not loja_codigo or not usuario_id:
             return jsonify(error="Não autenticado. Faça login primeiro."), 401
         loja = get_loja_by_codigo(loja_codigo)
         if not loja or loja.get("status") != "aprovado":
             session.clear()
             return jsonify(error="Sessão inválida. Faça login novamente."), 401
+        usuario = get_usuario_by_id(usuario_id)
+        if not usuario or usuario.get("loja") != loja_codigo or not usuario.get("ativo"):
+            session.clear()
+            return jsonify(error="Sessão inválida. Faça login novamente."), 401
         return func(*args, **kwargs)
     return wrapper
+
+def require_role(*papeis):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if session.get("papel") not in papeis:
+                return jsonify(error="Acesso restrito: permissão insuficiente."), 403
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 def require_admin(func):
     @functools.wraps(func)
@@ -100,17 +116,28 @@ def _carregar_pedido_itens(pedido_id: int, loja_codigo: str):
 @app.post("/auth/signup")
 def auth_signup():
     data = request.get_json(silent=True) or {}
+    nome_loja = (data.get("nome_loja") or "").strip()
     nome = (data.get("nome") or "").strip()
+    login = (data.get("login") or "").strip()
     senha = (data.get("senha") or "").strip()
-    if not nome or not senha:
-        return jsonify(error="Nome e senha são obrigatórios."), 400
+    if not nome_loja or not nome or not login or not senha:
+        return jsonify(error="Nome da loja, seu nome, login e senha são obrigatórios."), 400
     senha_hash = generate_password_hash(senha)
     conn = get_conn()
     try:
-        conn.execute("INSERT INTO lojas (codigo, nome, senha_hash) VALUES (?, ?, ?)", (nome, nome, senha_hash))
+        # Loja (tenant, pendente de aprovação) e primeiro usuário admin
+        # nascem juntos, na mesma transação.
+        conn.execute("BEGIN")
+        conn.execute("INSERT INTO lojas (codigo, nome) VALUES (?, ?)", (nome_loja, nome_loja))
+        conn.execute(
+            "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao, ativo) VALUES (?, ?, ?, ?, 'admin', 0, 1)",
+            (nome_loja, nome, login, senha_hash),
+        )
         conn.commit()
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as e:
         conn.rollback()
+        if "usuarios" in str(e):
+            return jsonify(error="Já existe um usuário com este login nesta loja."), 409
         return jsonify(error="Já existe uma loja com este nome."), 409
     finally:
         conn.close()
@@ -120,14 +147,23 @@ def auth_signup():
 @limiter.limit("5 per minute; 30 per hour")
 def auth_login():
     data = request.get_json(silent=True) or {}
-    loja_codigo = (data.get("nome") or "").strip()
+    nome_loja = (data.get("nome_loja") or "").strip()
+    login = (data.get("login") or "").strip()
     senha = (data.get("senha") or "").strip()
-    if not loja_codigo or not senha:
-        return jsonify(error="Nome da loja e senha são obrigatórios."), 400
-    loja_db = get_loja_by_codigo(loja_codigo)
-    if loja_db and loja_db.get('status') == 'aprovado' and check_password_hash(loja_db['senha_hash'], senha):
-        session["loja_codigo"] = loja_db['codigo']
-        return jsonify(ok=True, loja=loja_db['codigo'])
+    if not nome_loja or not login or not senha:
+        return jsonify(error="Nome da loja, login e senha são obrigatórios."), 400
+    loja_db = get_loja_by_codigo(nome_loja)
+    usuario = get_usuario(nome_loja, login)
+    if (
+        loja_db and loja_db.get("status") == "aprovado"
+        and usuario and usuario.get("ativo")
+        and check_password_hash(usuario["senha_hash"], senha)
+    ):
+        session["loja_codigo"] = loja_db["codigo"]
+        session["usuario_id"] = usuario["id"]
+        session["papel"] = usuario["papel"]
+        return jsonify(ok=True, loja=loja_db["codigo"], usuario=usuario["nome"], papel=usuario["papel"])
+    # Mensagem única de propósito: não revelar se falhou loja, usuário ou senha.
     return jsonify(error="Credenciais inválidas."), 401
 
 @app.post("/auth/logout")
@@ -550,6 +586,7 @@ def update_cor_estoque(cor_id):
 # -----------------------------------------------------------------------------
 @app.post("/pix")
 @require_login
+@require_role("admin")
 def pix_salvar():
     loja = current_loja()
     data = request.get_json(silent=True) or {}

@@ -77,8 +77,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const payload = Object.fromEntries(new FormData(formSignup).entries());
 
     // Validação simples no frontend
-    if (!payload.nome || !payload.senha) {
-        showMsg('Nome da loja e senha são obrigatórios.');
+    if (!payload.nome_loja || !payload.nome || !payload.login || !payload.senha) {
+        showMsg('Nome da loja, seu nome, login e senha são obrigatórios.');
         return;
     }
 
@@ -86,9 +86,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (r.ok) {
         show('login');
-        // Pré-preenche o nome no formulário de login para facilitar
-        const loginNomeInput = formLogin?.querySelector('input[name="nome"]');
-        if (loginNomeInput) loginNomeInput.value = payload.nome;
+        // Pré-preenche loja e login no formulário de login para facilitar
+        const lojaInput = formLogin?.querySelector('input[name="nome_loja"]');
+        if (lojaInput) lojaInput.value = payload.nome_loja;
+        const loginInput = formLogin?.querySelector('input[name="login"]');
+        if (loginInput) loginInput.value = payload.login;
 
         showMsg('Loja criada! Agora você já pode entrar.', true);
         formSignup.reset();

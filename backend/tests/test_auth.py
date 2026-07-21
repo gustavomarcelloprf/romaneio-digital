@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -80,10 +81,19 @@ def client():
     os.environ["SECRET_KEY"] = TEST_SECRET
     os.environ["ADMIN_TOKEN"] = TEST_ADMIN_TOKEN
     sys.path.insert(0, str(BACKEND_DIR))
+    import database
+
+    # Banco temporário próprio: o DB_PATH ativo pode ser o de outro módulo
+    # de teste (o último a ser coletado), possivelmente sem schema criado.
+    tmp_db = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
+    database.DB_PATH = str(tmp_db)
+    database.init_db()
+
     import app as app_module
 
     app_module.app.config.update(TESTING=True)
     yield app_module.app.test_client()
+    tmp_db.unlink(missing_ok=True)
 
 
 def test_admin_sem_header_retorna_403(client):

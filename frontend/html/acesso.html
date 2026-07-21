@@ -18,8 +18,9 @@
         <section id="viewLogin">
           <h2>Entrar</h2>
           <form id="formLogin" class="grid" style="margin-bottom:12px">
-            <label>Nome da loja *<br><input name="nome" required></label>
-            <label>Senha *<br><input name="senha" type="password" required></label>
+            <label>Nome da loja *<br><input name="nome_loja" required></label>
+            <label>Login (usuário) *<br><input name="login" required autocomplete="username"></label>
+            <label>Senha *<br><input name="senha" type="password" required autocomplete="current-password"></label>
             <button type="submit">Entrar</button>
           </form>
           <p class="muted">Ainda não tem loja?
@@ -31,10 +32,10 @@
         <section id="viewSignup" hidden>
           <h2>Cadastrar loja</h2>
           <form id="formSignup" class="grid">
-            <label>Nome da loja *<br><input name="nome" required></label>
-            <label>Email<br><input name="email" type="email"></label>
-            <label>Telefone<br><input name="telefone"></label>
-            <label>Senha *<br><input name="senha" type="password" required></label>
+            <label>Nome da loja *<br><input name="nome_loja" required></label>
+            <label>Seu nome *<br><input name="nome" required></label>
+            <label>Login (usuário) *<br><input name="login" required autocomplete="username"></label>
+            <label>Senha *<br><input name="senha" type="password" required autocomplete="new-password"></label>
             <button type="submit">Cadastrar</button>
           </form>
           <p class="muted">Já tem conta?
