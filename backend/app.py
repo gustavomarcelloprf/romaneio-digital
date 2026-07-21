@@ -256,42 +256,95 @@ def cliente_update_api(cliente_id: int):
     finally:
         conn.close()
 
-@app.route("/vendedores", methods=["GET", "POST"])
+@app.get("/me")
 @require_login
-def vendedores_api():
+def me_api():
+    usuario = get_usuario_by_id(session.get("usuario_id"))
+    return jsonify(
+        loja=current_loja(),
+        usuario_id=usuario["id"],
+        nome=usuario["nome"],
+        papel=usuario["papel"],
+    )
+
+# -----------------------------------------------------------------------------
+# API: Usuários (gestão de operadores — somente admin da loja)
+# -----------------------------------------------------------------------------
+@app.route("/usuarios", methods=["GET", "POST"])
+@require_login
+@require_role("admin")
+def usuarios_api():
     loja = current_loja()
     conn = get_conn()
     if request.method == "GET":
-        vendedores = [dict(r) for r in conn.execute("SELECT id, nome FROM vendedores WHERE loja = ? ORDER BY nome ASC", (loja,)).fetchall()]
-        conn.close(); return jsonify(vendedores)
+        usuarios = [dict(r) for r in conn.execute(
+            "SELECT id, nome, login, papel, taxa_comissao, ativo FROM usuarios WHERE loja = ? ORDER BY nome ASC",
+            (loja,)
+        ).fetchall()]
+        conn.close(); return jsonify(usuarios)
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
         nome = (data.get("nome") or "").strip()
-        if not nome:
-            conn.close(); return jsonify(error="Nome do vendedor é obrigatório."), 400
+        login = (data.get("login") or "").strip()
+        senha = (data.get("senha") or "").strip()
+        taxa = _ptbr_to_float(data.get("taxa_comissao"))
+        if taxa is None: taxa = 0.0
+        if not nome or not login or not senha:
+            conn.close(); return jsonify(error="Nome, login e senha são obrigatórios."), 400
+        if taxa < 0:
+            conn.close(); return jsonify(error="Taxa de comissão não pode ser negativa."), 400
         try:
-            cur = conn.execute("INSERT INTO vendedores (nome, loja) VALUES (?, ?)", (nome, loja))
+            cur = conn.execute(
+                "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao, ativo) VALUES (?, ?, ?, ?, 'operador', ?, 1)",
+                (loja, nome, login, generate_password_hash(senha), taxa),
+            )
             new_id = cur.lastrowid
             conn.commit()
-            return jsonify(id=new_id, nome=nome), 201
+            return jsonify(id=new_id, nome=nome, login=login, papel="operador", taxa_comissao=taxa), 201
         except sqlite3.IntegrityError:
-            conn.rollback(); return jsonify(error=f"O vendedor '{nome}' já está cadastrado nesta loja."), 409
+            conn.rollback(); return jsonify(error=f"Já existe um usuário com o login '{login}' nesta loja."), 409
         finally: conn.close()
 
-@app.route("/vendedores/<int:vendedor_id>", methods=["DELETE"])
+@app.put("/usuarios/<int:usuario_id>")
 @require_login
-def vendedor_delete_api(vendedor_id: int):
+@require_role("admin")
+def usuario_update_api(usuario_id: int):
     loja = current_loja()
+    data = request.get_json(silent=True) or {}
     conn = get_conn()
     try:
-        cur = conn.execute("DELETE FROM vendedores WHERE id = ? AND loja = ?", (vendedor_id, loja))
-        if cur.rowcount == 0:
-            conn.close(); return jsonify(error="Vendedor não encontrado."), 404
+        alvo = conn.execute(
+            "SELECT id, nome, taxa_comissao, ativo FROM usuarios WHERE id = ? AND loja = ?",
+            (usuario_id, loja)
+        ).fetchone()
+        if not alvo:
+            return jsonify(error="Usuário não encontrado."), 404
+
+        nome = (data.get("nome") or "").strip() or alvo["nome"]
+        taxa = _ptbr_to_float(data.get("taxa_comissao"))
+        if taxa is None: taxa = alvo["taxa_comissao"]
+        if taxa < 0:
+            return jsonify(error="Taxa de comissão não pode ser negativa."), 400
+        ativo = 1 if data.get("ativo", alvo["ativo"]) in (1, True, "1", "true") else 0
+        if usuario_id == session.get("usuario_id") and not ativo:
+            return jsonify(error="Você não pode desativar a si mesmo."), 400
+
+        conn.execute(
+            "UPDATE usuarios SET nome = ?, taxa_comissao = ?, ativo = ? WHERE id = ? AND loja = ?",
+            (nome, taxa, ativo, usuario_id, loja),
+        )
+        senha_nova = (data.get("senha") or "").strip()
+        if senha_nova:
+            conn.execute(
+                "UPDATE usuarios SET senha_hash = ? WHERE id = ? AND loja = ?",
+                (generate_password_hash(senha_nova), usuario_id, loja),
+            )
         conn.commit()
-        return jsonify(ok=True, message="Vendedor removido com sucesso.")
+        return jsonify(ok=True, message="Usuário atualizado.")
     except sqlite3.Error as e:
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
-    finally: conn.close()
+    finally:
+        conn.close()
 
 # -----------------------------------------------------------------------------
 # API: Pedidos com Lógica de Estoque
@@ -305,7 +358,7 @@ def pedidos_api():
         sort_by = request.args.get("sort", "data_desc")
         order_options = {"data_desc": "p.id DESC", "data_asc": "p.id ASC", "cliente_asc": "cliente_nome ASC, p.id DESC", "total_desc": "p.total DESC", "total_asc": "p.total ASC"}
         order_clause = order_options.get(sort_by, "p.id DESC")
-        sql = f"SELECT p.id, p.data_iso, p.tecido, p.total, p.desconto, c.nome AS cliente_nome FROM pedidos p JOIN clientes c ON c.id = p.cliente_id WHERE p.loja = ? ORDER BY {order_clause} LIMIT 200"
+        sql = f"SELECT p.id, p.data_iso, p.tecido, p.total, p.desconto, p.comissao_valor, c.nome AS cliente_nome, COALESCE(u.nome, '') AS vendedor_nome FROM pedidos p JOIN clientes c ON c.id = p.cliente_id LEFT JOIN usuarios u ON u.id = p.usuario_id WHERE p.loja = ? ORDER BY {order_clause} LIMIT 200"
         pedidos_raw = conn.execute(sql, (loja,)).fetchall()
         pedidos = [dict(p) for p in pedidos_raw]
         conn.close()
@@ -316,7 +369,6 @@ def pedidos_api():
         cliente_id = data.get("cliente_id")
         preco_unitario = _ptbr_to_float(data.get("preco_unitario"))
         itens_in = data.get("itens") or []
-        vendedor_id = data.get("vendedor_id")
         descontar_estoque = data.get("descontar_estoque", False)
         tecido_nome = (data.get("tecido") or "").strip()
 
@@ -327,13 +379,17 @@ def pedidos_api():
         if not conn.execute("SELECT 1 FROM clientes WHERE id = ? AND loja = ?", (cliente_id, loja)).fetchone():
             conn.close()
             return jsonify(error="Cliente inválido para esta loja."), 400
-        if vendedor_id and not conn.execute("SELECT 1 FROM vendedores WHERE id = ? AND loja = ?", (vendedor_id, loja)).fetchone():
-            conn.close()
-            return jsonify(error="Vendedor inválido para esta loja."), 400
 
         total_kg = sum(_ptbr_to_float(it.get("peso", 0)) for it in itens_in)
         desconto = _ptbr_to_float(data.get("desconto")) or 0.0
         total = round((total_kg * preco_unitario) - desconto, 2)
+
+        # O vendedor é sempre o usuário logado; a comissão é congelada aqui
+        # com a taxa vigente — mudanças futuras não afetam este pedido.
+        usuario_id = session.get("usuario_id")
+        vendedor = get_usuario_by_id(usuario_id)
+        comissao_taxa = float(vendedor.get("taxa_comissao") or 0)
+        comissao_valor = round(total * comissao_taxa / 100, 2)
         
         try:
             conn.execute("BEGIN")
@@ -362,8 +418,8 @@ def pedidos_api():
 
             now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
             cur_pedido = conn.execute(
-                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, vendedor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, vendedor_id)
+                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, usuario_id, comissao_taxa, comissao_valor)
             )
             pedido_id = cur_pedido.lastrowid
 
@@ -406,25 +462,26 @@ def pedido_single_api(pedido_id: int):
         # NOTA: A lógica aqui NÃO afeta o estoque. É apenas para correção de dados do romaneio.
         try:
             cliente_id = data.get("cliente_id")
-            vendedor_id = data.get("vendedor_id")
             tecido_nome = (data.get("tecido") or "").strip()
             preco_unitario = _ptbr_to_float(data.get("preco_unitario"))
             desconto = _ptbr_to_float(data.get("desconto")) or 0.0
             itens_in = data.get("itens") or []
-            
+
             total_kg = sum(_ptbr_to_float(it.get("peso", 0)) for it in itens_in)
             total = round((total_kg * preco_unitario) - desconto, 2)
 
             if not conn.execute("SELECT 1 FROM clientes WHERE id = ? AND loja = ?", (cliente_id, loja)).fetchone():
                 return jsonify(error="Cliente inválido para esta loja."), 400
-            if vendedor_id and not conn.execute("SELECT 1 FROM vendedores WHERE id = ? AND loja = ?", (vendedor_id, loja)).fetchone():
-                return jsonify(error="Vendedor inválido para esta loja."), 400
 
             conn.execute("BEGIN")
+            # O vendedor (usuario_id) não muda na edição; a comissão é
+            # recalculada sobre o novo total usando a taxa JÁ CONGELADA
+            # no pedido, não a taxa atual do usuário.
             cur = conn.execute("""
-                UPDATE pedidos SET cliente_id=?, vendedor_id=?, tecido=?, preco_unitario=?, desconto=?, total=?
+                UPDATE pedidos SET cliente_id=?, tecido=?, preco_unitario=?, desconto=?, total=?,
+                    comissao_valor = ROUND(? * comissao_taxa / 100, 2)
                 WHERE id=? AND loja=?
-            """, (cliente_id, vendedor_id, tecido_nome, preco_unitario, desconto, total, pedido_id, loja))
+            """, (cliente_id, tecido_nome, preco_unitario, desconto, total, total, pedido_id, loja))
             if cur.rowcount == 0:
                 conn.rollback()
                 return jsonify(error="Pedido não encontrado."), 404

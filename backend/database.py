@@ -64,22 +64,17 @@ def init_db() -> None:
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_clientes_loja ON clientes(loja)")
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS vendedores (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome        TEXT NOT NULL,
-            loja        TEXT NOT NULL,
-            created_at  TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (loja) REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE CASCADE,
-            UNIQUE(nome, loja)
-        )
-    """)
+    # O vendedor de um pedido é o usuário logado (tabela usuarios);
+    # a antiga tabela vendedores foi aposentada.
+    cur.execute("DROP TABLE IF EXISTS vendedores")
 
+    # comissao_taxa/comissao_valor são congeladas no momento do pedido:
+    # mudar a taxa do usuário depois não altera pedidos passados.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS pedidos (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             cliente_id   INTEGER,
-            vendedor_id  INTEGER,
+            usuario_id   INTEGER,
             loja         TEXT,
             data_iso     TEXT,
             tecido       TEXT,
@@ -87,11 +82,13 @@ def init_db() -> None:
             preco_unitario REAL,
             total        REAL,
             desconto     REAL DEFAULT 0,
+            comissao_taxa  REAL NOT NULL DEFAULT 0,
+            comissao_valor REAL NOT NULL DEFAULT 0,
             observacoes  TEXT,
             created_at   TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE SET NULL,
             FOREIGN KEY (loja)       REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE SET NULL,
-            FOREIGN KEY (vendedor_id) REFERENCES vendedores(id) ON DELETE SET NULL
+            FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE SET NULL
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_pedidos_loja ON pedidos(loja)")
@@ -191,12 +188,13 @@ def get_pedido(pedido_id: int) -> Optional[Dict[str, Any]]:
     cur.execute("""
         SELECT
             p.id, p.data_iso, p.tecido, p.quantidade, p.preco_unitario, p.total, p.desconto,
-            p.loja AS loja_codigo, p.cliente_id, p.vendedor_id,
+            p.loja AS loja_codigo, p.cliente_id, p.usuario_id,
+            p.comissao_taxa, p.comissao_valor,
             COALESCE(c.nome, '') AS cliente_nome,
-            COALESCE(v.nome, '') AS vendedor_nome
+            COALESCE(u.nome, '') AS vendedor_nome
         FROM pedidos p
         LEFT JOIN clientes c ON c.id = p.cliente_id
-        LEFT JOIN vendedores v ON v.id = p.vendedor_id
+        LEFT JOIN usuarios u ON u.id = p.usuario_id
         WHERE p.id=?
     """, (pedido_id,))
     row = cur.fetchone()

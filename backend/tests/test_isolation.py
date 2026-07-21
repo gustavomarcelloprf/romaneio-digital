@@ -57,8 +57,6 @@ def dados():
     cor_a = cur.lastrowid
     cur.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente A', 'loja_a')")
     cliente_a = cur.lastrowid
-    cur.execute("INSERT INTO vendedores (nome, loja) VALUES ('Vendedor A', 'loja_a')")
-    vendedor_a = cur.lastrowid
     cur.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente B', 'loja_b')")
     cliente_b = cur.lastrowid
     conn.commit()
@@ -67,7 +65,6 @@ def dados():
         "tecido_a": tecido_a,
         "cor_a": cor_a,
         "cliente_a": cliente_a,
-        "vendedor_a": vendedor_a,
         "cliente_b": cliente_b,
     }
     _TMP_DB.unlink(missing_ok=True)
@@ -145,19 +142,26 @@ def test_post_pedido_com_cliente_de_outra_loja(dados):
     assert resp.get_json()["error"] == "Cliente inválido para esta loja."
 
 
-def test_post_pedido_com_vendedor_de_outra_loja(dados):
-    resp = _client("loja_b").post(
+def test_pedido_grava_usuario_logado_como_vendedor(dados):
+    # O vendedor deixou de vir do payload: é sempre o usuário da sessão.
+    c = _client("loja_b")
+    resp = c.post(
         "/pedidos",
         json={
             "cliente_id": dados["cliente_b"],
-            "vendedor_id": dados["vendedor_a"],
             "preco_unitario": "10,00",
             "tecido": "Malha",
             "itens": [{"cor": "Azul", "peso": "1,0"}],
         },
     )
-    assert resp.status_code == 400
-    assert resp.get_json()["error"] == "Vendedor inválido para esta loja."
+    assert resp.status_code == 201
+    conn = database.get_conn()
+    row = conn.execute(
+        "SELECT p.usuario_id, u.loja FROM pedidos p JOIN usuarios u ON u.id = p.usuario_id WHERE p.id = ?",
+        (resp.get_json()["id"],),
+    ).fetchone()
+    conn.close()
+    assert row["loja"] == "loja_b"
 
 
 def test_post_pedido_valido_da_propria_loja(dados):
