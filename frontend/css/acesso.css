@@ -1,0 +1,205 @@
+/* ====== Tela de Acesso (login/cadastro) ======
+   Carregado DEPOIS do style.css: complementa/sobrescreve só nesta página. */
+
+body.access {
+  margin: 0;
+  background:
+    radial-gradient(1000px 500px at 85% -10%, #e0e7ff 0%, transparent 60%),
+    radial-gradient(800px 400px at -10% 110%, #d1fae5 0%, transparent 55%),
+    var(--bg);
+}
+
+.access-shell {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.access-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 32px 28px;
+  box-shadow: 0 12px 40px rgba(17, 24, 39, 0.10);
+}
+
+/* ---- Marca ---- */
+.access-brand {
+  text-align: center;
+  margin-bottom: 24px;
+}
+.access-brand h1 {
+  font-size: 22px;
+  margin: 12px 0 4px;
+}
+.access-brand p {
+  margin: 0;
+  font-size: 14px;
+}
+.brand-mark {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto;
+  border-radius: 12px;
+  background: var(--primary);
+  color: var(--primary-text);
+  font-weight: 700;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: 0.5px;
+}
+
+/* ---- Abas Entrar / Criar loja ---- */
+.access-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px;
+  margin-bottom: 16px;
+}
+.access-tab {
+  flex: 1;
+  width: auto;
+  border: 0;
+  background: transparent;
+  border-radius: 999px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+.access-tab:hover { color: var(--text); }
+.access-tab.is-active {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+/* ---- Campos ---- */
+.field { margin-bottom: 14px; }
+.field label {
+  display: block;
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+.field-error {
+  color: #b91c1c; /* contraste AA sobre fundo branco */
+  font-size: 13px;
+  font-weight: 600;
+  margin: 4px 0 0;
+  min-height: 0;
+}
+.field-error:empty { display: none; }
+.field.invalid input {
+  border-color: #dc2626;
+  background: #fef2f2;
+}
+
+/* Foco visível em tudo que é interativo nesta tela */
+.access input:focus-visible,
+.access button:focus-visible,
+.access a:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+/* ---- Mostrar/ocultar senha ---- */
+.senha-wrap { position: relative; }
+.senha-wrap input { padding-right: 84px; }
+.toggle-senha {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: auto;
+  border: 0;
+  background: transparent;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.toggle-senha:hover { color: var(--text); background: var(--bg); }
+
+/* ---- Botão de submit com estado de carregamento ---- */
+.btn-submit {
+  width: 100%;
+  margin-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.btn-submit:disabled {
+  opacity: 0.75;
+  cursor: wait;
+}
+.btn-submit .spinner {
+  display: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: acesso-spin 0.7s linear infinite;
+}
+.btn-submit.is-loading .spinner { display: inline-block; }
+@keyframes acesso-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .btn-submit .spinner { animation: none; }
+}
+
+/* ---- Mensagens de status (#msg) ---- */
+#msg {
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  margin: 0 0 16px;
+}
+#msg:empty { display: none; }
+#msg.ok {
+  color: #166534;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+}
+#msg.erro {
+  color: #991b1b;
+  background: #fee2e2;
+  border: 1px solid #fca5a5;
+}
+
+/* ---- Rodapé das seções ---- */
+.access-alt {
+  text-align: center;
+  margin: 16px 0 0;
+  font-size: 14px;
+}
+.access-note {
+  text-align: center;
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+.access a {
+  color: #1d4ed8;
+  font-weight: 600;
+  text-decoration: none;
+}
+.access a:hover { text-decoration: underline; }
+
+/* ---- Celular ---- */
+@media (max-width: 480px) {
+  .access-shell { padding: 16px 12px; }
+  .access-card { padding: 24px 18px; }
+}
