@@ -5,174 +5,188 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Romaneio Digital</title>
     <!-- A versão foi incrementada para forçar a atualização do cache dos arquivos CSS/JS -->
-    <link rel="stylesheet" href="../css/style.css?v=32" />
+    <link rel="stylesheet" href="../css/style.css?v=33" />
 </head>
 <body>
-    <div class="container">
-        <header class="app-header">
-            <h1 class="app-title">
-                Romaneio Digital
-                <span id="lojaBadge" class="pill"></span>
-                <span id="userBadge" class="pill"></span>
-            </h1>
-            <button id="logoutBtn" class="btn-secondary">Sair</button>
-        </header>
+    <div class="app-shell">
 
-        <!-- Dashboard da loja (visível somente para admin) -->
-        <section class="card" id="dashboardSection" hidden>
-            <h2>Dashboard</h2>
-            <div class="periodo-bar" data-relatorio-periodo>
-                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="hoje">Hoje</button>
-                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="7d">7 dias</button>
-                <button type="button" class="btn-secondary btn-sm periodo-btn is-active" data-preset="30d">30 dias</button>
-                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="mes">Este mês</button>
-                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
-            </div>
-            <div id="dashCards" class="dash-cards"></div>
-            <h3>Por operador</h3>
-            <div id="dashOperadoresWrap" class="table-responsive"></div>
-            <h3>Tecidos mais vendidos</h3>
-            <div id="dashMaisWrap" class="table-responsive"></div>
-            <h3>Tecidos menos vendidos</h3>
-            <div id="dashMenosWrap" class="table-responsive"></div>
-            <h3>Encalhados no período</h3>
-            <div id="dashEncalhadosWrap"></div>
-        </section>
+        <!-- ====== Menu lateral (vira gaveta no celular) ====== -->
+        <aside id="sidebar" class="sidebar" aria-label="Menu principal">
+            <div class="sidebar-brand">Romaneio Digital</div>
+            <!-- Os itens são montados pelo JS a partir das permissões do /me -->
+            <nav id="mainNav" class="nav"></nav>
+        </aside>
+        <div id="navOverlay" class="nav-overlay" hidden></div>
 
-        <!-- Minhas Vendas (todos os papéis) -->
-        <section class="card" id="minhasVendasSection">
-            <h2>Minhas Vendas</h2>
-            <div class="periodo-bar" data-relatorio-periodo>
-                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="hoje">Hoje</button>
-                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="7d">7 dias</button>
-                <button type="button" class="btn-secondary btn-sm periodo-btn is-active" data-preset="30d">30 dias</button>
-                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="mes">Este mês</button>
-                <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
-            </div>
-            <div id="meuCards" class="dash-cards"></div>
-            <h3>Meus últimos pedidos</h3>
-            <div id="meusPedidosWrap" class="table-responsive"></div>
-        </section>
-
-        <!-- Seção Novo Pedido -->
-        <section class="card">
-            <h2>Novo Pedido</h2>
-            <form id="formPedido">
-                <div class="grid">
-                    <div class="form-group"><label>Cliente *<select id="clienteId" name="cliente_id" required></select></label></div>
-                    <div class="form-group"><label>Tecido *<input id="tecido" name="tecido" required placeholder="Nome exato do tecido em estoque"></label></div>
-                    <div class="form-group"><label>Preço unitário (R$/kg) *<input id="preco" name="preco_unitario" inputmode="decimal" placeholder="Ex.: 25,90" required></label></div>
-                    <div class="form-group" style="grid-column: 1 / -1;"><label>Desconto (R$)<input id="desconto" name="desconto" placeholder="0,00" type="text"></label></div>
+        <!-- ====== Coluna de conteúdo ====== -->
+        <div class="app-main">
+            <header class="app-header">
+                <button id="menuToggle" class="menu-toggle btn-secondary" type="button"
+                        aria-label="Abrir menu" aria-expanded="false" aria-controls="sidebar">☰</button>
+                <div class="header-identity">
+                    <span id="lojaBadge" class="loja-nome"></span>
+                    <span id="userBadge" class="pill"></span>
                 </div>
+                <button id="logoutBtn" class="btn-secondary">Sair</button>
+            </header>
 
-                <div class="card-inset">
-                    <strong>Itens do pedido</strong>
-                    <div class="item-row">
-                        <input id="cor" placeholder="Cor (ex.: azul)">
-                        <input id="peso" inputmode="decimal" placeholder="Peso (kg) ex.: 3,50">
-                        <button id="btnAddItem" type="button" class="btn-primary" style="width: auto;">Adicionar</button>
+            <main class="views">
+
+                <!-- ====== Tela: Vender (inicial) ====== -->
+                <section class="view card" id="view-vender" hidden>
+                    <h2>Vender</h2>
+                    <form id="formPedido">
+                        <div class="grid">
+                            <div class="form-group"><label>Cliente *<select id="clienteId" name="cliente_id" required></select></label></div>
+                            <div class="form-group"><label>Tecido *<input id="tecido" name="tecido" required placeholder="Nome exato do tecido em estoque"></label></div>
+                            <div class="form-group"><label>Preço unitário (R$/kg) *<input id="preco" name="preco_unitario" inputmode="decimal" placeholder="Ex.: 25,90" required></label></div>
+                            <div class="form-group" style="grid-column: 1 / -1;"><label>Desconto (R$)<input id="desconto" name="desconto" placeholder="0,00" type="text"></label></div>
+                        </div>
+
+                        <div class="card-inset">
+                            <strong>Itens do pedido</strong>
+                            <div class="item-row">
+                                <input id="cor" placeholder="Cor (ex.: azul)">
+                                <input id="peso" inputmode="decimal" placeholder="Peso (kg) ex.: 3,50">
+                                <button id="btnAddItem" type="button" class="btn-primary" style="width: auto;">Adicionar</button>
+                            </div>
+                            <div id="itensWrap" style="margin-top:12px;"></div>
+                        </div>
+
+                        <div class="form-group-checkbox">
+                            <input type="checkbox" id="descontar_estoque" name="descontar_estoque" checked>
+                            <label for="descontar_estoque">Descontar do estoque</label>
+                        </div>
+
+                        <div class="totals-card">
+                            <div class="totals-row">
+                                <span class="muted">Total (auto):</span>
+                                <strong id="totalPreview" class="pill">R$ 0,00</strong>
+                            </div>
+                            <button type="submit" class="btn-primary">Salvar Pedido</button>
+                        </div>
+                        <div id="msgPedido" class="msg"></div>
+                    </form>
+                </section>
+
+                <!-- ====== Tela: Pedidos ====== -->
+                <section class="view card" id="view-pedidos" hidden>
+                    <h2>Pedidos</h2>
+                    <div class="form-group" style="max-width: 300px;">
+                        <label>Ordenar por: <select id="orderSort">
+                            <option value="data_desc">Data (Mais Recente)</option>
+                            <option value="data_asc">Data (Mais Antiga)</option>
+                            <option value="cliente_asc">Cliente (A-Z)</option>
+                            <option value="total_desc">Valor (Maior)</option>
+                            <option value="total_asc">Valor (Menor)</option>
+                        </select></label>
                     </div>
-                    <div id="itensWrap" style="margin-top:12px;"></div>
-                </div>
-                
-                <div class="form-group-checkbox">
-                    <input type="checkbox" id="descontar_estoque" name="descontar_estoque" checked>
-                    <label for="descontar_estoque">Descontar do estoque</label>
-                </div>
+                    <div id="pedidosWrap" class="table-responsive"></div>
+                </section>
 
-                <div class="totals-card">
-                    <div class="totals-row">
-                        <span class="muted">Total (auto):</span>
-                        <strong id="totalPreview" class="pill">R$ 0,00</strong>
+                <!-- ====== Tela: Dashboard da loja (gerente e admin) ====== -->
+                <section class="view card" id="view-dashboard" hidden>
+                    <h2>Dashboard</h2>
+                    <div class="periodo-bar" data-relatorio-periodo>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="hoje">Hoje</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="7d">7 dias</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn is-active" data-preset="30d">30 dias</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="mes">Este mês</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
                     </div>
-                    <button type="submit" class="btn-primary">Salvar Pedido</button>
-                </div>
-                <div id="msgPedido" class="msg"></div>
-            </form>
-        </section>
+                    <div id="dashCards" class="dash-cards"></div>
+                    <h3>Por operador</h3>
+                    <div id="dashOperadoresWrap" class="table-responsive"></div>
+                    <h3>Tecidos mais vendidos</h3>
+                    <div id="dashMaisWrap" class="table-responsive"></div>
+                    <h3>Tecidos menos vendidos</h3>
+                    <div id="dashMenosWrap" class="table-responsive"></div>
+                    <h3>Encalhados no período</h3>
+                    <div id="dashEncalhadosWrap"></div>
+                </section>
 
-        <!-- Seção de Gestão de Estoque -->
-        <section class="card">
-            <h2>Gestão de Estoque</h2>
-            <form id="formAddTecido">
-                <h3>Adicionar novo tipo de tecido</h3>
-                <div class="item-row">
-                    <input name="nome_tecido" required placeholder="Ex: Brim, Malha PV, etc.">
-                    <button type="submit" class="btn-primary" style="width: auto;">Adicionar Tecido</button>
-                </div>
-            </form>
-            <hr class="divider">
-            <div id="estoqueWrap">
-                <!-- O conteúdo do estoque (cards de tecidos e cores) será renderizado aqui pelo JavaScript -->
-            </div>
-        </section>
-        
-        <!-- Seção de Cadastros Auxiliares -->
-        <section class="card">
-            <h2>Cadastros</h2>
-            <!-- Novo Cliente -->
-            <h3>Novo Cliente</h3>
-            <form id="formCliente" class="grid">
-                <div class="form-group"><label>Nome *<input name="nome" required></label></div>
-                <div class="form-group"><label>Telefone<input name="telefone"></label></div>
-                <div class="form-group"><label>Email<input name="email" type="email"></label></div>
-                <button type="submit" class="btn-primary" style="grid-column: 1 / -1;">Salvar Cliente</button>
-            </form>
-        </section>
+                <!-- ====== Tela: Minhas Vendas ====== -->
+                <section class="view card" id="view-minhas-vendas" hidden>
+                    <h2>Minhas Vendas</h2>
+                    <div class="periodo-bar" data-relatorio-periodo>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="hoje">Hoje</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="7d">7 dias</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn is-active" data-preset="30d">30 dias</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="mes">Este mês</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
+                    </div>
+                    <div id="meuCards" class="dash-cards"></div>
+                    <h3>Meus últimos pedidos</h3>
+                    <div id="meusPedidosWrap" class="table-responsive"></div>
+                </section>
 
-        <!-- Seção Usuários (visível somente para admin; o vendedor de um
-             pedido é sempre o usuário logado) -->
-        <section class="card" id="usuariosSection" hidden>
-            <h2>Usuários</h2>
-            <h3>Novo Operador</h3>
-            <form id="formUsuario" class="grid">
-                <div class="form-group"><label>Nome *<input name="nome" required></label></div>
-                <div class="form-group"><label>Login *<input name="login" required autocomplete="off"></label></div>
-                <div class="form-group"><label>Senha *<input name="senha" type="password" required autocomplete="new-password"></label></div>
-                <div class="form-group"><label>Comissão (%)<input name="taxa_comissao" inputmode="decimal" placeholder="Ex.: 2,5"></label></div>
-                <button type="submit" class="btn-primary" style="grid-column: 1 / -1;">Criar Operador</button>
-            </form>
-            <div id="usuarioMsg" class="msg"></div>
-            <hr class="divider">
-            <h3>Equipe</h3>
-            <div id="usuariosWrap" class="table-responsive"></div>
-        </section>
+                <!-- ====== Tela: Estoque ====== -->
+                <section class="view card" id="view-estoque" hidden>
+                    <h2>Estoque</h2>
+                    <!-- Só gerente/admin mexem no estoque: o form some para o operador. -->
+                    <form id="formAddTecido" hidden>
+                        <h3>Adicionar novo tipo de tecido</h3>
+                        <div class="item-row">
+                            <input name="nome_tecido" required placeholder="Ex: Brim, Malha PV, etc.">
+                            <button type="submit" class="btn-primary" style="width: auto;">Adicionar Tecido</button>
+                        </div>
+                        <hr class="divider">
+                    </form>
+                    <div id="estoqueWrap">
+                        <!-- O conteúdo do estoque (cards de tecidos e cores) será renderizado aqui pelo JavaScript -->
+                    </div>
+                </section>
 
-        <!-- Seção de Listagens -->
-        <section class="card">
-            <h2>Listagens</h2>
-            
-            <h3>Pedidos Recentes</h3>
-            <div class="form-group" style="max-width: 300px;">
-                <label>Ordenar por: <select id="orderSort">
-                    <option value="data_desc">Data (Mais Recente)</option>
-                    <option value="data_asc">Data (Mais Antiga)</option>
-                    <option value="cliente_asc">Cliente (A-Z)</option>
-                    <option value="total_desc">Valor (Maior)</option>
-                    <option value="total_asc">Valor (Menor)</option>
-                </select></label>
-            </div>
-            <div id="pedidosWrap" class="table-responsive"></div>
-            
-            <h3>Clientes Registrados</h3>
-            <div class="form-group"><input type="search" id="clienteSearch" placeholder="Buscar cliente por nome..."></div>
-            <div id="clientesWrap" class="table-responsive"></div>
-        </section>
+                <!-- ====== Tela: Clientes ====== -->
+                <section class="view card" id="view-clientes" hidden>
+                    <h2>Clientes</h2>
+                    <h3>Novo Cliente</h3>
+                    <form id="formCliente" class="grid">
+                        <div class="form-group"><label>Nome *<input name="nome" required></label></div>
+                        <div class="form-group"><label>Telefone<input name="telefone"></label></div>
+                        <div class="form-group"><label>Email<input name="email" type="email"></label></div>
+                        <button type="submit" class="btn-primary" style="grid-column: 1 / -1;">Salvar Cliente</button>
+                    </form>
+                    <hr class="divider">
+                    <h3>Clientes Registrados</h3>
+                    <div class="form-group"><input type="search" id="clienteSearch" placeholder="Buscar cliente por nome..."></div>
+                    <div id="clientesWrap" class="table-responsive"></div>
+                </section>
 
-        <!-- Seção Configurações -->
-        <section class="card">
-            <h2>Configurações</h2>
-            <form id="formPix">
-                <h3>Chave Pix (Opcional)</h3>
-                <div class="item-row">
-                    <input name="pix_chave" type="text" placeholder="Sua chave Pix (CNPJ, e-mail, etc.)">
-                    <button class="btn-primary" type="submit" style="width: auto;">Salvar Pix</button>
-                </div>
-                <div id="pixMsg" class="msg"></div>
-            </form>
-        </section>
+                <!-- ====== Tela: Equipe (somente admin; o vendedor de um
+                     pedido é sempre o usuário logado) ====== -->
+                <section class="view card" id="view-equipe" hidden>
+                    <h2>Equipe</h2>
+                    <h3>Novo Operador</h3>
+                    <form id="formUsuario" class="grid">
+                        <div class="form-group"><label>Nome *<input name="nome" required></label></div>
+                        <div class="form-group"><label>Login *<input name="login" required autocomplete="off"></label></div>
+                        <div class="form-group"><label>Senha *<input name="senha" type="password" required autocomplete="new-password"></label></div>
+                        <div class="form-group"><label>Comissão (%)<input name="taxa_comissao" inputmode="decimal" placeholder="Ex.: 2,5"></label></div>
+                        <button type="submit" class="btn-primary" style="grid-column: 1 / -1;">Criar Operador</button>
+                    </form>
+                    <div id="usuarioMsg" class="msg"></div>
+                    <hr class="divider">
+                    <h3>Usuários da loja</h3>
+                    <div id="usuariosWrap" class="table-responsive"></div>
+                </section>
 
-    </div> <!-- Fim do .container -->
+                <!-- ====== Tela: Configurações (somente admin) ====== -->
+                <section class="view card" id="view-config" hidden>
+                    <h2>Configurações</h2>
+                    <form id="formPix">
+                        <h3>Chave Pix (Opcional)</h3>
+                        <div class="item-row">
+                            <input name="pix_chave" type="text" placeholder="Sua chave Pix (CNPJ, e-mail, etc.)">
+                            <button class="btn-primary" type="submit" style="width: auto;">Salvar Pix</button>
+                        </div>
+                        <div id="pixMsg" class="msg"></div>
+                    </form>
+                </section>
+
+            </main>
+        </div> <!-- Fim do .app-main -->
+    </div> <!-- Fim do .app-shell -->
 
     <!-- Modal de Edição -->
     <div id="editModal" class="modal-overlay">
@@ -196,7 +210,7 @@
                     </div>
                     <div id="editItensWrap" style="margin-top:12px;"></div>
                 </div>
-                
+
                 <div class="form-group-checkbox">
                     <input type="checkbox" id="editDescontarEstoque" name="descontar_estoque" disabled>
                     <label for="editDescontarEstoque">Alterações aqui não afetam o estoque</label>
@@ -214,7 +228,6 @@
     </div>
 
     <noscript>Ative o JavaScript para usar o sistema.</noscript>
-    <script src="../js/script.js?v=32"></script>
+    <script src="../js/script.js?v=33"></script>
 </body>
 </html>
-

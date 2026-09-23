@@ -9,8 +9,78 @@
         pedidoEmEdicao: { id: null, itens: [] },
         loja: sessionStorage.getItem("loja_codigo") || "",
         me: null,
-        periodo: "30d"
+        permissoes: {},
+        periodo: "30d",
+        view: null
     };
+
+    // --- Navegação: uma tela por vez, sem recarregar a página ---
+    // Cada tela declara a capacidade que a habilita; o menu é montado a
+    // partir das permissões que o /me devolve, então o que o papel não pode
+    // ver simplesmente não existe no menu.
+    const TELAS = [
+        { id: "vender",        label: "Vender",        perm: "vender" },
+        { id: "pedidos",       label: "Pedidos",       perm: "pedidos_ver" },
+        { id: "dashboard",     label: "Dashboard",     perm: "relatorio_loja" },
+        { id: "minhas-vendas", label: "Minhas Vendas", perm: null },
+        { id: "estoque",       label: "Estoque",       perm: "estoque_ver" },
+        { id: "clientes",      label: "Clientes",      perm: "clientes_gerir" },
+        { id: "equipe",        label: "Equipe",        perm: "usuarios_gerir" },
+        { id: "config",        label: "Configurações", perm: "config_editar" },
+    ];
+
+    function pode(permissao) {
+        return !permissao || state.permissoes[permissao] === true;
+    }
+
+    function telasVisiveis() {
+        return TELAS.filter(t => pode(t.perm));
+    }
+
+    function montarMenu() {
+        const nav = $("#mainNav");
+        if (!nav) return;
+        nav.innerHTML = telasVisiveis().map(t => `
+            <button type="button" class="nav-item" data-view="${esc(t.id)}">${esc(t.label)}</button>
+        `).join('');
+    }
+
+    function fecharMenuMobile() {
+        document.body.classList.remove("nav-open");
+        $("#menuToggle")?.setAttribute("aria-expanded", "false");
+        $("#navOverlay")?.setAttribute("hidden", "");
+    }
+
+    // Carregamento sob demanda: ao abrir uma tela, seus dados são
+    // reatualizados (o resto continua como está).
+    function aoAbrirTela(id) {
+        if (id === "pedidos") loadOrders();
+        else if (id === "clientes") loadClients();
+        else if (id === "estoque") loadStock();
+        else if (id === "dashboard" || id === "minhas-vendas") loadRelatorios();
+        else if (id === "equipe") loadUsuarios();
+    }
+
+    function irPara(id, { atualizarHash = true } = {}) {
+        const permitidas = telasVisiveis().map(t => t.id);
+        // Tela inexistente ou fora do alcance do papel: cai na inicial.
+        if (!permitidas.includes(id)) id = permitidas[0] || "vender";
+
+        document.querySelectorAll(".view").forEach(sec => {
+            sec.hidden = sec.id !== `view-${id}`;
+        });
+        document.querySelectorAll(".nav-item").forEach(btn => {
+            btn.classList.toggle("is-active", btn.dataset.view === id);
+        });
+
+        state.view = id;
+        if (atualizarHash && window.location.hash !== `#${id}`) {
+            window.location.hash = id;
+        }
+        fecharMenuMobile();
+        window.scrollTo(0, 0);
+        aoAbrirTela(id);
+    }
 
     // --- Funções Utilitárias ---
     function ptbrToNumber(v) {
@@ -160,14 +230,22 @@
         const me = await jfetch("/me");
         if (!me) return;
         state.me = me;
+        state.permissoes = me.permissoes || {};
+        // O /me é a fonte de verdade do nome da loja (o sessionStorage
+        // serve só como palpite inicial e nem sempre está preenchido).
+        state.loja = me.loja || state.loja;
+
+        const lojaBadge = $("#lojaBadge");
+        if (lojaBadge) lojaBadge.textContent = state.loja;
         const userBadge = $("#userBadge");
         if (userBadge) userBadge.textContent = `${me.nome} (${me.papel})`;
-        // A seção de Usuários e o Dashboard da loja só existem para o admin.
-        if (me.papel === "admin") {
-            $("#usuariosSection")?.removeAttribute("hidden");
-            $("#dashboardSection")?.removeAttribute("hidden");
-            await loadUsuarios();
-        }
+
+        montarMenu();
+        // O form de cadastro de tecido só faz sentido para quem pode mutar
+        // o estoque (o backend recusa o resto com 403).
+        $("#formAddTecido")?.toggleAttribute("hidden", !pode("estoque_mutar"));
+
+        if (pode("usuarios_gerir")) await loadUsuarios();
     }
 
     // --- Dashboards (Fase 1) ---
@@ -199,13 +277,16 @@
     }
 
     function renderDashboardLoja(rel) {
+        // Comissão é o que a loja tem A PAGAR, e só o dono (admin) vê esse
+        // número: o backend simplesmente não manda o campo para o gerente.
+        const veComissoes = rel.comissoes_a_pagar !== undefined;
         const cards = $("#dashCards");
         if (cards) {
             cards.innerHTML =
                 statCard("Faturamento", fmtBRL(rel.faturamento_total)) +
                 statCard("Pedidos", rel.num_pedidos) +
                 statCard("Ticket médio", fmtBRL(rel.ticket_medio)) +
-                statCard("Comissão total", fmtBRL(rel.comissao_total));
+                (veComissoes ? statCard("Comissões a pagar", fmtBRL(rel.comissoes_a_pagar)) : '');
         }
         const opWrap = $("#dashOperadoresWrap");
         if (opWrap) {
@@ -213,13 +294,13 @@
             const max = Math.max(...ops.map(o => o.faturamento || 0), 0);
             opWrap.innerHTML = ops.length ? `
                 <table class="table">
-                    <thead><tr><th>Operador</th><th>Pedidos</th><th>Faturamento</th><th>Comissão</th><th></th></tr></thead>
+                    <thead><tr><th>Operador</th><th>Pedidos</th><th>Faturamento</th>${veComissoes ? '<th>Comissão a pagar</th>' : ''}<th></th></tr></thead>
                     <tbody>${ops.map(o => `
                         <tr>
                             <td>${esc(o.nome)}</td>
                             <td>${esc(o.num_pedidos)}</td>
                             <td>${fmtBRL(o.faturamento)}</td>
-                            <td>${fmtBRL(o.comissao)}</td>
+                            ${veComissoes ? `<td>${fmtBRL(o.comissao)}</td>` : ''}
                             <td>${barCell(o.faturamento || 0, max)}</td>
                         </tr>`).join('')}
                     </tbody>
@@ -239,26 +320,29 @@
     }
 
     function renderMinhasVendas(rel) {
+        // O admin é o dono: não recebe comissão, então a coluna some da
+        // visão dele em vez de mostrar uma fileira de zeros.
+        const minhaComissao = rel.mostra_comissao !== false;
         const cards = $("#meuCards");
         if (cards) {
             cards.innerHTML =
                 statCard("Faturamento", fmtBRL(rel.faturamento)) +
                 statCard("Pedidos", rel.num_pedidos) +
-                statCard("Comissão", fmtBRL(rel.comissao));
+                (minhaComissao ? statCard("Comissão", fmtBRL(rel.comissao)) : '');
         }
         const wrap = $("#meusPedidosWrap");
         if (wrap) {
             const pedidos = rel.ultimos_pedidos || [];
             wrap.innerHTML = pedidos.length ? `
                 <table class="table">
-                    <thead><tr><th>ID</th><th>Data</th><th>Cliente</th><th>Total</th><th>Comissão</th></tr></thead>
+                    <thead><tr><th>ID</th><th>Data</th><th>Cliente</th><th>Total</th>${minhaComissao ? '<th>Comissão</th>' : ''}</tr></thead>
                     <tbody>${pedidos.map(p => `
                         <tr>
                             <td>${esc(p.id)}</td>
                             <td>${esc(fmtDataBR(p.data_iso))}</td>
                             <td>${esc(p.cliente_nome)}</td>
                             <td>${fmtBRL(p.total)}</td>
-                            <td>${fmtBRL(p.comissao_valor)}</td>
+                            ${minhaComissao ? `<td>${fmtBRL(p.comissao_valor)}</td>` : ''}
                         </tr>`).join('')}
                     </tbody>
                 </table>` : '<p class="muted" style="padding:12px;">Nenhum pedido seu no período.</p>';
@@ -269,7 +353,7 @@
         const qs = periodoQuery();
         try {
             const promessas = [jfetch(`/api/relatorio/meu?${qs}`)];
-            if (state.me?.papel === "admin") promessas.push(jfetch(`/api/relatorio/loja?${qs}`));
+            if (pode("relatorio_loja")) promessas.push(jfetch(`/api/relatorio/loja?${qs}`));
             const [meu, loja] = await Promise.all(promessas);
             if (meu) renderMinhasVendas(meu);
             if (loja) renderDashboardLoja(loja);
@@ -339,35 +423,42 @@
     function renderEstoque(estoque) {
         const estoqueWrap = $("#estoqueWrap");
         if (!estoqueWrap) return;
+        // Operador consulta o estoque, mas não mexe: os controles de
+        // mutação não são renderizados para ele (o backend também recusa).
+        const podeMutar = pode("estoque_mutar");
         if (estoque.length === 0) {
-            estoqueWrap.innerHTML = `<p class="muted">Nenhum tipo de tecido cadastrado. Comece adicionando um acima.</p>`;
+            estoqueWrap.innerHTML = podeMutar
+                ? `<p class="muted">Nenhum tipo de tecido cadastrado. Comece adicionando um acima.</p>`
+                : `<p class="muted">Nenhum tipo de tecido cadastrado.</p>`;
             return;
         }
 
+        const colunas = podeMutar ? 4 : 3;
         estoqueWrap.innerHTML = estoque.map(tecido => `
             <div class="estoque-card">
                 <div class="estoque-header">
                     <h4>${esc(tecido.nome_tecido)}</h4>
-                    <button class="btn-secondary btn-danger btn-sm remove-tecido-btn" data-id="${tecido.id}">Remover Tecido</button>
+                    ${podeMutar ? `<button class="btn-secondary btn-danger btn-sm remove-tecido-btn" data-id="${tecido.id}">Remover Tecido</button>` : ''}
                 </div>
                 <div class="table-responsive">
                     <table class="table">
-                        <thead><tr><th>Cor</th><th>Peso (kg)</th><th>Peças</th><th>Ação</th></tr></thead>
+                        <thead><tr><th>Cor</th><th>Peso (kg)</th><th>Peças</th>${podeMutar ? '<th>Ação</th>' : ''}</tr></thead>
                         <tbody>
                             ${tecido.cores.length ? tecido.cores.map(cor => `
                                 <tr>
                                     <td>${esc(cor.nome_cor)}</td>
                                     <td>${esc(numberToPtbr(cor.peso_kg))}</td>
                                     <td>${esc(cor.qtd_pecas)}</td>
-                                    <td class="actions">
+                                    ${podeMutar ? `<td class="actions">
                                         <button class="btn-secondary btn-sm adjust-cor-btn" data-id="${cor.id}" data-nome="${esc(cor.nome_cor)}" data-peso="${esc(cor.peso_kg)}" data-pecas="${esc(cor.qtd_pecas)}">Ajustar</button>
                                         <button class="btn-secondary btn-danger btn-sm remove-cor-btn" data-id="${cor.id}">X</button>
-                                    </td>
+                                    </td>` : ''}
                                 </tr>
-                            `).join('') : `<tr><td colspan="4" class="muted" style="text-align:center;">Nenhuma cor adicionada.</td></tr>`}
+                            `).join('') : `<tr><td colspan="${colunas}" class="muted" style="text-align:center;">Nenhuma cor adicionada.</td></tr>`}
                         </tbody>
                     </table>
                 </div>
+                ${podeMutar ? `
                 <form class="form-add-cor" data-tecido-id="${tecido.id}">
                     <div class="item-row">
                         <input name="nome_cor" placeholder="Nova Cor" required>
@@ -375,7 +466,7 @@
                         <input name="qtd_pecas" placeholder="Nº Peças" type="number" value="1">
                         <button type="submit" class="btn-primary btn-sm" style="width:auto;">Adicionar/Somar Cor</button>
                     </div>
-                </form>
+                </form>` : ''}
             </div>
         `).join('');
     }
@@ -392,8 +483,11 @@
     async function loadInitialData() {
         $("#lojaBadge").textContent = state.loja;
         try {
-            // loadMe primeiro: os relatórios dependem do papel do usuário.
+            // loadMe primeiro: o menu e os relatórios dependem do papel.
             await loadMe();
+            // Com o menu já montado, abre a tela pedida na URL (ou a inicial).
+            irPara((window.location.hash || "").replace("#", "") || "vender",
+                   { atualizarHash: false });
             await Promise.all([
                 loadClients(),
                 loadOrders(),
@@ -447,6 +541,29 @@
         const editModal = $("#editModal");
         const estoqueWrap = $("#estoqueWrap");
         const formAddTecido = $("#formAddTecido");
+
+        // ===== Navegação entre telas (client-side, sem reload) =====
+        $("#mainNav")?.addEventListener("click", e => {
+            const btn = e.target.closest(".nav-item");
+            if (btn) irPara(btn.dataset.view);
+        });
+
+        // Voltar/avançar do navegador e links com #hash continuam funcionando.
+        window.addEventListener("hashchange", () => {
+            const id = (window.location.hash || "").replace("#", "");
+            if (id && id !== state.view) irPara(id, { atualizarHash: false });
+        });
+
+        // No celular o menu é uma gaveta; o overlay fecha ao tocar fora.
+        $("#menuToggle")?.addEventListener("click", () => {
+            const aberto = document.body.classList.toggle("nav-open");
+            $("#menuToggle").setAttribute("aria-expanded", String(aberto));
+            $("#navOverlay")?.toggleAttribute("hidden", !aberto);
+        });
+        $("#navOverlay")?.addEventListener("click", fecharMenuMobile);
+        document.addEventListener("keydown", e => {
+            if (e.key === "Escape") fecharMenuMobile();
+        });
 
         // Presets de período dos relatórios: um clique atualiza AMBAS as barras
         // (Dashboard e Minhas Vendas) e recarrega os dois relatórios.

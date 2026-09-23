@@ -50,6 +50,53 @@ if not os.environ.get("ADMIN_TOKEN"):
     raise RuntimeError("ADMIN_TOKEN não configurado.")
 
 init_db()
+
+# -----------------------------------------------------------------------------
+# Papéis e Permissões
+# -----------------------------------------------------------------------------
+# Mapa central: capacidade -> papéis que a possuem. Os decorators e o /me
+# consultam SÓ este mapa, então encaixar um papel novo (ex.: 'gerente' ganhar
+# mais poderes) é editar uma linha aqui — nenhuma rota precisa mudar.
+#
+# 'gerente' já está desenhado e valendo no backend; ainda não há UI para criar
+# um (a criação de usuário continua gerando 'operador').
+PAPEIS = ("admin", "gerente", "operador")
+
+PERMISSOES = {
+    # Vender / criar pedido: todo mundo vende.
+    "vender":              ("operador", "gerente", "admin"),
+    "pedidos_ver":         ("operador", "gerente", "admin"),
+    "clientes_gerir":      ("operador", "gerente", "admin"),
+    # Estoque: qualquer um consulta; só gerente/admin mexem
+    # (inclui os futuros recebimentos).
+    "estoque_ver":         ("operador", "gerente", "admin"),
+    "estoque_mutar":       ("gerente", "admin"),
+    # Dashboard da loja: gerente vê o desempenho; só o admin (dono) vê
+    # quanto tem de comissão a PAGAR.
+    "relatorio_loja":      ("gerente", "admin"),
+    "relatorio_comissoes": ("admin",),
+    # Gestão de gente e configuração da loja: dono apenas.
+    "usuarios_gerir":      ("admin",),
+    "config_editar":       ("admin",),
+}
+
+
+def papel_atual():
+    return session.get("papel")
+
+
+def pode(permissao, papel=None):
+    """True se o papel informado (ou o da sessão) tem a permissão."""
+    if papel is None:
+        papel = papel_atual()
+    return papel in PERMISSOES.get(permissao, ())
+
+
+def permissoes_do_papel(papel):
+    """Dicionário capacidade -> bool, consumido pelo front para montar o menu."""
+    return {nome: (papel in papeis) for nome, papeis in PERMISSOES.items()}
+
+
 # -----------------------------------------------------------------------------
 # Funções Helper
 # -----------------------------------------------------------------------------
@@ -81,11 +128,12 @@ def require_login(func):
         return func(*args, **kwargs)
     return wrapper
 
-def require_role(*papeis):
+def require_perm(permissao):
+    """Exige uma CAPACIDADE, não um papel: a lista de papéis vive em PERMISSOES."""
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            if session.get("papel") not in papeis:
+            if not pode(permissao):
                 return jsonify(error="Acesso restrito: permissão insuficiente."), 403
             return func(*args, **kwargs)
         return wrapper
@@ -265,6 +313,9 @@ def me_api():
         usuario_id=usuario["id"],
         nome=usuario["nome"],
         papel=usuario["papel"],
+        # O menu do front é montado a partir daqui: cada tela pede uma
+        # capacidade, e o que o papel não tem simplesmente não aparece.
+        permissoes=permissoes_do_papel(usuario["papel"]),
     )
 
 # -----------------------------------------------------------------------------
@@ -272,7 +323,7 @@ def me_api():
 # -----------------------------------------------------------------------------
 @app.route("/usuarios", methods=["GET", "POST"])
 @require_login
-@require_role("admin")
+@require_perm("usuarios_gerir")
 def usuarios_api():
     loja = current_loja()
     conn = get_conn()
@@ -307,14 +358,14 @@ def usuarios_api():
 
 @app.put("/usuarios/<int:usuario_id>")
 @require_login
-@require_role("admin")
+@require_perm("usuarios_gerir")
 def usuario_update_api(usuario_id: int):
     loja = current_loja()
     data = request.get_json(silent=True) or {}
     conn = get_conn()
     try:
         alvo = conn.execute(
-            "SELECT id, nome, taxa_comissao, ativo FROM usuarios WHERE id = ? AND loja = ?",
+            "SELECT id, nome, papel, taxa_comissao, ativo FROM usuarios WHERE id = ? AND loja = ?",
             (usuario_id, loja)
         ).fetchone()
         if not alvo:
@@ -325,6 +376,12 @@ def usuario_update_api(usuario_id: int):
         if taxa is None: taxa = alvo["taxa_comissao"]
         if taxa < 0:
             return jsonify(error="Taxa de comissão não pode ser negativa."), 400
+        # O admin é o dono: a comissão é despesa dele, não receita.
+        # A taxa do admin fica travada em 0 e não é editável.
+        if alvo["papel"] == "admin":
+            if taxa:
+                return jsonify(error="O admin é o dono da loja e não recebe comissão."), 400
+            taxa = 0.0
         ativo = 1 if data.get("ativo", alvo["ativo"]) in (1, True, "1", "true") else 0
         if usuario_id == session.get("usuario_id") and not ativo:
             return jsonify(error="Você não pode desativar a si mesmo."), 400
@@ -365,6 +422,9 @@ def pedidos_api():
         return jsonify(pedidos)
     
     if request.method == "POST":
+        if not pode("vender"):
+            conn.close()
+            return jsonify(error="Acesso restrito: permissão insuficiente."), 403
         data = request.get_json(silent=True) or {}
         cliente_id = data.get("cliente_id")
         preco_unitario = _ptbr_to_float(data.get("preco_unitario"))
@@ -386,9 +446,10 @@ def pedidos_api():
 
         # O vendedor é sempre o usuário logado; a comissão é congelada aqui
         # com a taxa vigente — mudanças futuras não afetam este pedido.
+        # O admin é o dono e não tira comissão de si mesmo: taxa 0, sempre.
         usuario_id = session.get("usuario_id")
         vendedor = get_usuario_by_id(usuario_id)
-        comissao_taxa = float(vendedor.get("taxa_comissao") or 0)
+        comissao_taxa = 0.0 if vendedor.get("papel") == "admin" else float(vendedor.get("taxa_comissao") or 0)
         comissao_valor = round(total * comissao_taxa / 100, 2)
         
         try:
@@ -525,6 +586,7 @@ def get_estoque():
 
 @app.post("/api/estoque/tecidos")
 @require_login
+@require_perm("estoque_mutar")
 def add_tecido_estoque():
     loja = current_loja()
     data = request.get_json()
@@ -546,6 +608,7 @@ def add_tecido_estoque():
 
 @app.post("/api/estoque/cores")
 @require_login
+@require_perm("estoque_mutar")
 def add_cor_estoque():
     loja = current_loja()
     data = request.get_json()
@@ -584,6 +647,7 @@ def add_cor_estoque():
 
 @app.delete("/api/estoque/tecidos/<int:tecido_id>")
 @require_login
+@require_perm("estoque_mutar")
 def delete_tecido(tecido_id):
     loja = current_loja()
     conn = get_conn()
@@ -597,6 +661,7 @@ def delete_tecido(tecido_id):
 
 @app.delete("/api/estoque/cores/<int:cor_id>")
 @require_login
+@require_perm("estoque_mutar")
 def delete_cor(cor_id):
     loja = current_loja()
     conn = get_conn()
@@ -613,6 +678,7 @@ def delete_cor(cor_id):
 
 @app.put("/api/estoque/cores/<int:cor_id>")
 @require_login
+@require_perm("estoque_mutar")
 def update_cor_estoque(cor_id):
     loja = current_loja()
     data = request.get_json()
@@ -663,21 +729,35 @@ def _periodo_from_args():
 
 @app.get("/api/relatorio/loja")
 @require_login
-@require_role("admin")
+@require_perm("relatorio_loja")
 def relatorio_loja():
     loja = current_loja()
+    # Comissão é DESPESA do dono, não receita da loja: só o admin enxerga
+    # o quanto tem a pagar. O gerente vê o desempenho sem esse número.
+    ve_comissoes = pode("relatorio_comissoes")
     de, ate, ate_ex = _periodo_from_args()
     conn = get_conn()
     try:
         tot = conn.execute(
-            "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat, COALESCE(SUM(comissao_valor), 0) AS com "
+            "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat "
             "FROM pedidos WHERE loja = ? AND data_iso >= ? AND data_iso < ?",
             (loja, de, ate_ex),
         ).fetchone()
         num_pedidos = tot["n"]
         faturamento_total = round(tot["fat"], 2)
-        comissao_total = round(tot["com"], 2)
         ticket_medio = round(faturamento_total / num_pedidos, 2) if num_pedidos else 0.0
+
+        # Só as comissões de quem de fato recebe (o admin nunca recebe).
+        comissoes_a_pagar = round(
+            conn.execute(
+                "SELECT COALESCE(SUM(p.comissao_valor), 0) AS com FROM pedidos p "
+                "LEFT JOIN usuarios u ON u.id = p.usuario_id "
+                "WHERE p.loja = ? AND p.data_iso >= ? AND p.data_iso < ? "
+                "AND COALESCE(u.papel, '') != 'admin'",
+                (loja, de, ate_ex),
+            ).fetchone()["com"],
+            2,
+        )
 
         por_operador = [
             {
@@ -685,7 +765,7 @@ def relatorio_loja():
                 "nome": r["nome"],
                 "num_pedidos": r["num_pedidos"],
                 "faturamento": round(r["faturamento"], 2),
-                "comissao": round(r["comissao"], 2),
+                **({"comissao": round(r["comissao"], 2)} if ve_comissoes else {}),
             }
             for r in conn.execute(
                 "SELECT p.usuario_id, COALESCE(u.nome, '') AS nome, COUNT(*) AS num_pedidos, "
@@ -730,17 +810,19 @@ def relatorio_loja():
     finally:
         conn.close()
 
-    return jsonify(
+    payload = dict(
         periodo={"de": de, "ate": ate},
         faturamento_total=faturamento_total,
         num_pedidos=num_pedidos,
         ticket_medio=ticket_medio,
-        comissao_total=comissao_total,
         por_operador=por_operador,
         tecidos_mais_vendidos=tecidos[:5],
         tecidos_menos_vendidos=sorted(tecidos, key=lambda t: t["faturamento"])[:5],
         tecidos_encalhados=encalhados,
     )
+    if ve_comissoes:
+        payload["comissoes_a_pagar"] = comissoes_a_pagar
+    return jsonify(**payload)
 
 @app.get("/api/relatorio/meu")
 @require_login
@@ -774,11 +856,15 @@ def relatorio_meu():
     finally:
         conn.close()
 
+    # O admin não recebe comissão: some o número da visão dele em vez de
+    # mostrar um zero que parece um erro de cálculo.
+    recebe_comissao = papel_atual() != "admin"
     return jsonify(
         periodo={"de": de, "ate": ate},
         num_pedidos=tot["n"],
         faturamento=round(tot["fat"], 2),
-        comissao=round(tot["com"], 2),
+        comissao=round(tot["com"], 2) if recebe_comissao else 0.0,
+        mostra_comissao=recebe_comissao,
         ultimos_pedidos=ultimos,
     )
 
@@ -787,7 +873,7 @@ def relatorio_meu():
 # -----------------------------------------------------------------------------
 @app.post("/pix")
 @require_login
-@require_role("admin")
+@require_perm("config_editar")
 def pix_salvar():
     loja = current_loja()
     data = request.get_json(silent=True) or {}
