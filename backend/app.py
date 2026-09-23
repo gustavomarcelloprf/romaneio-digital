@@ -2,14 +2,14 @@
 import os
 import re
 import io
+import csv
 import hmac
+import unicodedata
 import functools
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import sqlite3
 import sys
-import csv
-import unicodedata
 sys.path.append(str(Path(__file__).resolve().parent))
 
 # --- Bibliotecas de Terceiros (Flask, etc.) ---
@@ -21,6 +21,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from openpyxl import load_workbook
+import openpyxl
 
 # --- Módulos do Projeto (Romaneio Digital) ---
 from database import (
@@ -71,7 +72,7 @@ PERMISSOES = {
     "pedidos_ver":         ("operador", "gerente", "admin"),
     "clientes_gerir":      ("operador", "gerente", "admin"),
     # Estoque: qualquer um consulta; só gerente/admin mexem
-    # (inclui os futuros recebimentos).
+    # (inclui a entrada de mercadoria / recebimento).
     "estoque_ver":         ("operador", "gerente", "admin"),
     "estoque_mutar":       ("gerente", "admin"),
     # Dashboard da loja: gerente vê o desempenho; só o admin (dono) vê
@@ -109,6 +110,9 @@ def _ptbr_to_float(val):
     s = re.sub(r"[^\d,.\-]", "", str(val).strip()).replace(".", "").replace(",", ".")
     try: return float(s)
     except (ValueError, TypeError): return None
+
+class EstoqueInsuficiente(Exception):
+    """Venda que o estoque não cobre: aborta a transação com mensagem clara (409)."""
 
 def current_loja():
     return (session.get("loja_codigo") or "").strip()
@@ -461,24 +465,30 @@ def pedidos_api():
             if descontar_estoque:
                 tecido_row = conn.execute("SELECT id FROM estoque_tecidos WHERE nome_tecido = ? AND loja = ?", (tecido_nome, loja)).fetchone()
                 if not tecido_row:
-                    raise sqlite3.IntegrityError(f"Tipo de tecido '{tecido_nome}' não encontrado no estoque.")
+                    raise EstoqueInsuficiente(f"Tipo de tecido '{tecido_nome}' não encontrado no estoque.")
                 tecido_id = tecido_row['id']
 
+                # A baixa é POR PESO: a venda sai do total (kg) da cor. Várias
+                # linhas da mesma cor somam antes de validar. qtd_pecas é só
+                # informativo e não é mais decrementado aqui.
+                peso_por_cor = {}
                 for item in itens_in:
                     cor_nome = (item.get("cor") or "").strip()
                     peso_pedido = _ptbr_to_float(item.get("peso", 0))
                     if not cor_nome or peso_pedido <= 0: continue
-                    cor_row = conn.execute("SELECT id, peso_kg, qtd_pecas FROM estoque_cores WHERE tecido_id = ? AND nome_cor = ?", (tecido_id, cor_nome)).fetchone()
-                    if not cor_row or cor_row['peso_kg'] < peso_pedido or cor_row['qtd_pecas'] < 1:
-                        if not cor_row:
-                            msg_erro = f"Cor '{cor_nome}' não encontrada no estoque de '{tecido_nome}'."
-                        elif cor_row['peso_kg'] < peso_pedido:
-                            msg_erro = f"Peso insuficiente para {tecido_nome} - cor {cor_nome}. (Disponível: {cor_row['peso_kg']} kg)"
-                        else:
-                            msg_erro = f"Não há peças disponíveis para {tecido_nome} - cor {cor_nome}."
-                        raise sqlite3.IntegrityError(msg_erro)
+                    peso_por_cor[cor_nome] = peso_por_cor.get(cor_nome, 0) + peso_pedido
 
-                    conn.execute("UPDATE estoque_cores SET peso_kg = peso_kg - ?, qtd_pecas = qtd_pecas - 1 WHERE id = ?", (peso_pedido, cor_row['id']))
+                for cor_nome, peso_pedido in peso_por_cor.items():
+                    cor_row = conn.execute("SELECT id, peso_kg FROM estoque_cores WHERE tecido_id = ? AND nome_cor = ?", (tecido_id, cor_nome)).fetchone()
+                    if not cor_row:
+                        raise EstoqueInsuficiente(f"Cor '{cor_nome}' não encontrada no estoque de '{tecido_nome}'.")
+                    if cor_row['peso_kg'] + 1e-9 < peso_pedido:
+                        raise EstoqueInsuficiente(
+                            f"Peso insuficiente para {tecido_nome} - cor {cor_nome}: "
+                            f"pedido {round(peso_pedido, 3)} kg, disponível {round(cor_row['peso_kg'], 3)} kg."
+                        )
+                    # ROUND evita resíduo de ponto flutuante (ex.: 0,30000000004 kg).
+                    conn.execute("UPDATE estoque_cores SET peso_kg = ROUND(peso_kg - ?, 3) WHERE id = ?", (peso_pedido, cor_row['id']))
 
             now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
             cur_pedido = conn.execute(
@@ -491,12 +501,15 @@ def pedidos_api():
             conn.executemany("INSERT INTO itens_pedido (pedido_id, descricao, cor, peso_kg) VALUES (?, ?, ?, ?)", itens_to_insert)
             
             conn.commit()
+        except EstoqueInsuficiente as e:
+            conn.rollback()
+            return jsonify(error=str(e)), 409
         except sqlite3.Error as e:
             conn.rollback()
             return jsonify(error=f"Erro de banco de dados: {e}"), 500
         finally:
             conn.close()
-            
+
         return jsonify(id=pedido_id, total=total), 201
 
 @app.route("/pedidos/<int:pedido_id>", methods=["GET", "PUT", "DELETE"])
@@ -707,6 +720,223 @@ def update_cor_estoque(cor_id):
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
         conn.close()
+
+# -----------------------------------------------------------------------------
+# API: Entrada de mercadoria (recebimento avulso)
+# -----------------------------------------------------------------------------
+# Duas formas de lançar, uma só confirmação: o lote digitado vai direto para
+# POST /api/estoque/entradas; a planilha passa antes por .../importar, que só
+# lê e devolve as linhas para o gerente/admin conferir — nada é gravado ali.
+ENTRADA_MAX_LINHAS = 2000
+PLANILHA_MAX_BYTES = 2 * 1024 * 1024
+
+# Cabeçalho normalizado (minúsculas, sem acento/espaço) -> campo da linha.
+_COLUNAS_PLANILHA = {
+    "tecido": "tecido",
+    "cor": "cor",
+    "peso": "peso", "pesokg": "peso", "kg": "peso",
+    "idrolo": "id_rolo", "iddorolo": "id_rolo", "rolo": "id_rolo", "rollid": "id_rolo",
+}
+
+def _peso_to_float(val):
+    """Peso vindo de digitação ou planilha: aceita '12,5', '1.234,5' e '12.5'.
+
+    _ptbr_to_float trata todo ponto como milhar ('12.5' -> 125), o que é
+    perigoso para CSV exportado com ponto decimal. Aqui, sem vírgula, o ponto
+    é decimal.
+    """
+    if val is None: return None
+    if isinstance(val, bool): return None
+    if isinstance(val, (int, float)): return float(val)
+    s = str(val).strip()
+    if "," in s: return _ptbr_to_float(s)
+    try: return float(re.sub(r"[^\d.\-]", "", s))
+    except ValueError: return None
+
+def _normalizar_cabecalho(nome):
+    s = unicodedata.normalize("NFKD", str(nome or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+def _texto_celula(val):
+    """Célula -> texto. Números inteiros do Excel (ex.: id do rolo 123.0) viram '123'."""
+    if val is None: return ""
+    if isinstance(val, float) and val.is_integer(): return str(int(val))
+    return str(val).strip()
+
+def _validar_linhas_entrada(linhas_in):
+    """Normaliza as linhas e devolve (linhas, erros). erros = [{linha, erro}], 1-based."""
+    linhas, erros = [], []
+    for i, it in enumerate(linhas_in, start=1):
+        if not isinstance(it, dict):
+            erros.append({"linha": i, "erro": "Linha inválida."}); continue
+        tecido = _texto_celula(it.get("tecido"))
+        cor = _texto_celula(it.get("cor"))
+        peso = _peso_to_float(it.get("peso"))
+        id_rolo = _texto_celula(it.get("id_rolo")) or None
+        faltando = [n for n, v in (("tecido", tecido), ("cor", cor)) if not v]
+        if faltando:
+            erros.append({"linha": i, "erro": f"Campo obrigatório vazio: {', '.join(faltando)}."}); continue
+        if peso is None or peso <= 0:
+            erros.append({"linha": i, "erro": f"Peso inválido: '{_texto_celula(it.get('peso'))}'."}); continue
+        linhas.append({"tecido": tecido, "cor": cor, "peso": round(peso, 3), "id_rolo": id_rolo})
+    return linhas, erros
+
+def _ler_planilha(nome_arquivo, conteudo):
+    """Lê csv/xlsx e devolve uma lista de dicts crus {tecido, cor, peso, id_rolo}."""
+    ext = Path(nome_arquivo or "").suffix.lower()
+    if ext == ".xlsx":
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+        except Exception:
+            raise ValueError("Não foi possível ler o arquivo .xlsx.")
+        try:
+            rows = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
+        finally:
+            wb.close()
+    elif ext == ".csv":
+        try:
+            texto = conteudo.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            texto = conteudo.decode("latin-1")
+        try:
+            # Excel em pt-BR exporta com ';'; outros com ',' ou tab.
+            dialeto = csv.Sniffer().sniff(texto[:4096], delimiters=";,\t")
+        except csv.Error:
+            dialeto = csv.excel
+        rows = list(csv.reader(io.StringIO(texto), dialeto))
+    else:
+        raise ValueError("Formato não suportado: envie .csv ou .xlsx.")
+
+    rows = [r for r in rows if any(_texto_celula(c) for c in r)]
+    if not rows:
+        raise ValueError("A planilha está vazia.")
+    campos = [_COLUNAS_PLANILHA.get(_normalizar_cabecalho(c)) for c in rows[0]]
+    faltando = [c for c in ("tecido", "cor", "peso") if c not in campos]
+    if faltando:
+        raise ValueError(f"Coluna(s) obrigatória(s) ausente(s) no cabeçalho: {', '.join(faltando)}.")
+    return [
+        {campo: valor for campo, valor in zip(campos, r) if campo}
+        for r in rows[1:]
+    ]
+
+@app.post("/api/estoque/entradas/importar")
+@require_login
+@require_perm("estoque_mutar")
+def importar_planilha_entrada():
+    arquivo = request.files.get("arquivo")
+    if not arquivo or not arquivo.filename:
+        return jsonify(error="Envie o arquivo da planilha (campo 'arquivo')."), 400
+    conteudo = arquivo.read(PLANILHA_MAX_BYTES + 1)
+    if len(conteudo) > PLANILHA_MAX_BYTES:
+        return jsonify(error="Planilha muito grande (máx. 2 MB)."), 400
+    try:
+        brutas = _ler_planilha(arquivo.filename, conteudo)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    if len(brutas) > ENTRADA_MAX_LINHAS:
+        return jsonify(error=f"Máximo de {ENTRADA_MAX_LINHAS} linhas por entrada."), 400
+    linhas, erros = _validar_linhas_entrada(brutas)
+    # A linha 1 da planilha é o cabeçalho: ajusta a numeração para o que o
+    # usuário vê no Excel.
+    for e in erros: e["linha"] += 1
+    return jsonify(linhas=linhas, erros=erros)
+
+@app.post("/api/estoque/entradas")
+@require_login
+@require_perm("estoque_mutar")
+def registrar_entrada():
+    loja = current_loja()
+    data = request.get_json(silent=True) or {}
+    fornecedor = (data.get("fornecedor") or "").strip() or None
+    data_entrada = (data.get("data") or "").strip() or datetime.now().strftime("%Y-%m-%d")
+    linhas_in = data.get("linhas")
+    if not isinstance(linhas_in, list) or not linhas_in:
+        return jsonify(error="Informe ao menos uma linha (tecido, cor, peso)."), 400
+    if len(linhas_in) > ENTRADA_MAX_LINHAS:
+        return jsonify(error=f"Máximo de {ENTRADA_MAX_LINHAS} linhas por entrada."), 400
+
+    # Tudo ou nada: qualquer linha inválida recusa a entrada inteira.
+    linhas, erros = _validar_linhas_entrada(linhas_in)
+    if erros:
+        return jsonify(error="Há linhas inválidas na entrada.", erros=erros), 400
+
+    ids_rolo = [l["id_rolo"] for l in linhas if l["id_rolo"]]
+    repetidos = sorted({r for r in ids_rolo if ids_rolo.count(r) > 1})
+    if repetidos:
+        return jsonify(error=f"Id de rolo repetido na entrada: {', '.join(repetidos)}."), 400
+
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN")
+        if ids_rolo:
+            marcas = ",".join("?" * len(ids_rolo))
+            ja = [r["roll_ext_id"] for r in conn.execute(
+                f"SELECT roll_ext_id FROM rolos WHERE loja = ? AND roll_ext_id IN ({marcas})",
+                (loja, *ids_rolo),
+            ).fetchall()]
+            if ja:
+                conn.rollback()
+                return jsonify(error=f"Rolo(s) já recebido(s) antes: {', '.join(sorted(ja))}."), 409
+
+        # A cor é casada sem diferenciar maiúsculas ('azul' credita 'Azul'),
+        # para a planilha não criar cores duplicadas. O tecido precisa existir:
+        # um nome de tecido errado vira erro, não um tecido novo silencioso.
+        tecidos = {
+            r["nome_tecido"].casefold(): (r["id"], r["nome_tecido"])
+            for r in conn.execute("SELECT id, nome_tecido FROM estoque_tecidos WHERE loja = ?", (loja,)).fetchall()
+        }
+        desconhecidos = sorted({l["tecido"] for l in linhas if l["tecido"].casefold() not in tecidos})
+        if desconhecidos:
+            conn.rollback()
+            return jsonify(error=f"Tecido(s) não cadastrado(s) no estoque: {', '.join(desconhecidos)}. Cadastre o tecido antes da entrada."), 400
+
+        entrada_id = conn.execute(
+            "INSERT INTO entradas (loja, fornecedor, data) VALUES (?, ?, ?)",
+            (loja, fornecedor, data_entrada),
+        ).lastrowid
+
+        cores_cache = {}
+        cores_criadas = []
+        for l in linhas:
+            tecido_id, tecido_nome = tecidos[l["tecido"].casefold()]
+            if tecido_id not in cores_cache:
+                cores_cache[tecido_id] = {
+                    r["nome_cor"].casefold(): (r["id"], r["nome_cor"])
+                    for r in conn.execute("SELECT id, nome_cor FROM estoque_cores WHERE tecido_id = ?", (tecido_id,)).fetchall()
+                }
+            cores = cores_cache[tecido_id]
+            chave = l["cor"].casefold()
+            if chave in cores:
+                cor_id, cor_nome = cores[chave]
+                conn.execute("UPDATE estoque_cores SET peso_kg = ROUND(peso_kg + ?, 3) WHERE id = ?", (l["peso"], cor_id))
+            else:
+                cor_nome = l["cor"]
+                cor_id = conn.execute(
+                    "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (?, ?, ?, 0)",
+                    (tecido_id, cor_nome, l["peso"]),
+                ).lastrowid
+                cores[chave] = (cor_id, cor_nome)
+                cores_criadas.append({"tecido": tecido_nome, "cor": cor_nome})
+            if l["id_rolo"]:
+                conn.execute(
+                    "INSERT INTO rolos (loja, entrada_id, tecido, cor, roll_ext_id, peso) VALUES (?, ?, ?, ?, ?, ?)",
+                    (loja, entrada_id, tecido_nome, cor_nome, l["id_rolo"], l["peso"]),
+                )
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+
+    return jsonify(
+        id=entrada_id,
+        linhas=len(linhas),
+        peso_total=round(sum(l["peso"] for l in linhas), 3),
+        rolos=len(ids_rolo),
+        cores_criadas=cores_criadas,
+    ), 201
+
 # -----------------------------------------------------------------------------
 # API: Relatórios (dashboards) — sempre escopados pela loja da sessão
 # -----------------------------------------------------------------------------

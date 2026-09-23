@@ -7,6 +7,7 @@
     const state = {
         novoPedido: { itens: [] },
         pedidoEmEdicao: { id: null, itens: [] },
+        entrada: { linhas: [] },
         loja: sessionStorage.getItem("loja_codigo") || "",
         me: null,
         permissoes: {},
@@ -247,6 +248,7 @@
         // O form de cadastro de tecido só faz sentido para quem pode mutar
         // o estoque (o backend recusa o resto com 403).
         $("#formAddTecido")?.toggleAttribute("hidden", !pode("estoque_mutar"));
+        $("#entradaMercadoria")?.toggleAttribute("hidden", !pode("estoque_mutar"));
 
         if (pode("usuarios_gerir")) await loadUsuarios();
     }
@@ -539,8 +541,133 @@
         try {
             const estoque = await jfetch("/api/estoque");
             renderEstoque(estoque);
+            // Sugestões de tecido na entrada: o backend recusa tecido não cadastrado.
+            const dl = $("#entradaTecidos");
+            if (dl) dl.innerHTML = estoque.map(t => `<option value="${esc(t.nome_tecido)}">`).join('');
         } catch (err) {
             $("#estoqueWrap").innerHTML = `<p class="msg erro">Erro ao carregar estoque: ${esc(err.message)}</p>`;
+        }
+    }
+
+    // ===== Entrada de mercadoria (lote digitado ou planilha) =====
+    // Peso da entrada: com vírgula é pt-BR ("1.234,5"); sem vírgula o ponto é
+    // decimal ("12.5"), como o backend interpreta.
+    function pesoEntrada(v) {
+        if (typeof v === "number") return v;
+        const s = String(v ?? "").trim();
+        if (!s) return null;
+        if (s.includes(",")) return ptbrToNumber(s);
+        const n = parseFloat(s.replace(/[^\d.-]/g, ""));
+        return isNaN(n) ? null : n;
+    }
+
+    function linhaEntradaVazia() {
+        return { tecido: "", cor: "", peso: "", id_rolo: "" };
+    }
+
+    function renderEntrada() {
+        const tbody = $("#entradaLinhas");
+        if (!tbody) return;
+        const linhas = state.entrada.linhas;
+        tbody.innerHTML = linhas.length ? linhas.map((l, i) => `
+            <tr data-index="${i}">
+                <td><input data-campo="tecido" list="entradaTecidos" value="${esc(l.tecido)}" placeholder="Tecido"></td>
+                <td><input data-campo="cor" value="${esc(l.cor)}" placeholder="Cor"></td>
+                <td><input data-campo="peso" inputmode="decimal" value="${esc(typeof l.peso === "number" ? numberToPtbr(l.peso) : l.peso)}" placeholder="0,000"></td>
+                <td><input data-campo="id_rolo" value="${esc(l.id_rolo ?? "")}" placeholder="Opcional"></td>
+                <td><button type="button" class="btn-secondary btn-danger btn-sm remove-entrada-linha">X</button></td>
+            </tr>
+        `).join('') : `<tr><td colspan="5" class="muted" style="text-align:center;">Nenhuma linha. Adicione linhas ou leia uma planilha.</td></tr>`;
+        atualizarResumoEntrada();
+    }
+
+    function atualizarResumoEntrada() {
+        const el = $("#entradaResumo");
+        if (!el) return;
+        const linhas = state.entrada.linhas;
+        const kg = linhas.reduce((acc, l) => acc + (pesoEntrada(l.peso) || 0), 0);
+        el.textContent = linhas.length
+            ? `${linhas.length} linha(s) · ${numberToPtbr(Math.round(kg * 1000) / 1000)} kg`
+            : "";
+    }
+
+    function msgEntrada(html) {
+        const el = $("#entradaMsg");
+        if (el) el.innerHTML = html;
+    }
+
+    function listaErrosEntrada(erros) {
+        if (!erros || !erros.length) return "";
+        return `<ul>${erros.map(e => `<li>Linha ${esc(e.linha)}: ${esc(e.erro)}</li>`).join('')}</ul>`;
+    }
+
+    // fetch direto (não jfetch): o upload precisa de multipart e a confirmação
+    // devolve a lista de linhas com erro, que o jfetch descartaria.
+    async function fetchEntrada(url, opts) {
+        const res = await fetch(url, { credentials: "include", ...opts });
+        if (res.status === 401) { window.location.href = "/acesso"; return null; }
+        const json = await res.json().catch(() => ({}));
+        return { ok: res.ok, status: res.status, json };
+    }
+
+    async function lerPlanilhaEntrada() {
+        const arquivo = $("#entradaArquivo")?.files?.[0];
+        if (!arquivo) return msgEntrada(`<p class="msg erro">Escolha um arquivo .csv ou .xlsx.</p>`);
+        const fd = new FormData();
+        fd.append("arquivo", arquivo);
+        msgEntrada(`<p class="muted">Lendo planilha...</p>`);
+        try {
+            const r = await fetchEntrada("/api/estoque/entradas/importar", { method: "POST", body: fd });
+            if (!r) return;
+            if (!r.ok) return msgEntrada(`<p class="msg erro">${esc(r.json.error || `Erro HTTP ${r.status}`)}</p>`);
+            const { linhas, erros } = r.json;
+            // Substitui a tabela pelas linhas lidas: o admin confere e confirma.
+            state.entrada.linhas = linhas.map(l => ({ ...l, id_rolo: l.id_rolo || "" }));
+            renderEntrada();
+            msgEntrada(
+                `<p class="msg">${esc(linhas.length)} linha(s) lida(s) de "${esc(arquivo.name)}". Confira e clique em Confirmar entrada.</p>` +
+                (erros.length ? `<p class="msg erro">${esc(erros.length)} linha(s) ignorada(s):</p>${listaErrosEntrada(erros)}` : "")
+            );
+        } catch (err) {
+            msgEntrada(`<p class="msg erro">Erro ao ler planilha: ${esc(err.message)}</p>`);
+        }
+    }
+
+    async function confirmarEntrada() {
+        const linhas = state.entrada.linhas.filter(l => l.tecido || l.cor || l.peso || l.id_rolo);
+        if (!linhas.length) return msgEntrada(`<p class="msg erro">Adicione ao menos uma linha.</p>`);
+        const kg = linhas.reduce((acc, l) => acc + (pesoEntrada(l.peso) || 0), 0);
+        if (!confirm(`Confirmar entrada de ${linhas.length} linha(s), total ${numberToPtbr(Math.round(kg * 1000) / 1000)} kg?`)) return;
+        const btn = $("#btnConfirmarEntrada");
+        if (btn) btn.disabled = true;
+        try {
+            const r = await fetchEntrada("/api/estoque/entradas", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    fornecedor: $("#entradaFornecedor")?.value.trim() || "",
+                    data: $("#entradaData")?.value || "",
+                    linhas: linhas.map(l => ({ tecido: l.tecido, cor: l.cor, peso: l.peso, id_rolo: l.id_rolo || null })),
+                }),
+            });
+            if (!r) return;
+            if (!r.ok) {
+                return msgEntrada(`<p class="msg erro">${esc(r.json.error || `Erro HTTP ${r.status}`)}</p>${listaErrosEntrada(r.json.erros)}`);
+            }
+            const { linhas: n, peso_total, cores_criadas } = r.json;
+            state.entrada.linhas = [linhaEntradaVazia()];
+            renderEntrada();
+            if ($("#entradaArquivo")) $("#entradaArquivo").value = "";
+            if ($("#entradaFornecedor")) $("#entradaFornecedor").value = "";
+            msgEntrada(
+                `<p class="msg">Entrada registrada: ${esc(n)} linha(s), ${esc(numberToPtbr(peso_total))} kg.</p>` +
+                (cores_criadas.length ? `<p class="muted">Cores novas: ${cores_criadas.map(c => `${esc(c.tecido)} / ${esc(c.cor)}`).join(', ')}</p>` : "")
+            );
+            loadStock();
+        } catch (err) {
+            msgEntrada(`<p class="msg erro">Erro ao registrar entrada: ${esc(err.message)}</p>`);
+        } finally {
+            if (btn) btn.disabled = false;
         }
     }
 
@@ -889,6 +1016,39 @@
                 enviarWhatsApp(pedidoId);
             }
         });
+
+        // ===== Entrada de mercadoria =====
+        if ($("#entradaMercadoria")) {
+            const entradaData = $("#entradaData");
+            if (entradaData && !entradaData.value) {
+                const d = new Date();
+                entradaData.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            }
+            state.entrada.linhas = [linhaEntradaVazia()];
+            renderEntrada();
+
+            $("#btnEntradaAddLinha")?.addEventListener('click', () => {
+                state.entrada.linhas.push(linhaEntradaVazia());
+                renderEntrada();
+                $("#entradaLinhas tr:last-child input")?.focus();
+            });
+            // Digitação só atualiza o estado (sem re-render, para não perder o foco).
+            $("#entradaLinhas")?.addEventListener('input', e => {
+                const campo = e.target.dataset.campo;
+                const tr = e.target.closest('tr[data-index]');
+                if (!campo || !tr) return;
+                state.entrada.linhas[parseInt(tr.dataset.index, 10)][campo] = e.target.value;
+                atualizarResumoEntrada();
+            });
+            $("#entradaLinhas")?.addEventListener('click', e => {
+                if (!e.target.classList.contains('remove-entrada-linha')) return;
+                const tr = e.target.closest('tr[data-index]');
+                state.entrada.linhas.splice(parseInt(tr.dataset.index, 10), 1);
+                renderEntrada();
+            });
+            $("#btnLerPlanilha")?.addEventListener('click', lerPlanilhaEntrada);
+            $("#btnConfirmarEntrada")?.addEventListener('click', confirmarEntrada);
+        }
 
         // ===== Event Listeners do Estoque =====
         formAddTecido?.addEventListener('submit', async e => {

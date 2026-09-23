@@ -155,6 +155,40 @@ def init_db() -> None:
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_despesas_loja_data ON despesas(loja, data)")
 
+    # 4. Entrada de mercadoria (recebimento avulso): cabeçalho do lote.
+    #    O efeito no estoque é somar o peso em estoque_cores.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS entradas (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja          TEXT NOT NULL,
+            fornecedor    TEXT,
+            data          TEXT,
+            created_at    TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (loja) REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE CASCADE
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_entradas_loja ON entradas(loja)")
+
+    # 5. Rolos: rastreabilidade opcional, só gravada quando a linha da entrada
+    #    traz o id do rolo. O mesmo id não entra duas vezes na mesma loja
+    #    (evita creditar em dobro ao reimportar a mesma planilha).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS rolos (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja          TEXT NOT NULL,
+            entrada_id    INTEGER NOT NULL,
+            tecido        TEXT NOT NULL,
+            cor           TEXT NOT NULL,
+            roll_ext_id   TEXT,
+            peso          REAL NOT NULL,
+            created_at    TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (loja) REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE CASCADE,
+            FOREIGN KEY (entrada_id) REFERENCES entradas(id) ON DELETE CASCADE,
+            UNIQUE(loja, roll_ext_id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_rolos_entrada ON rolos(entrada_id)")
+
     conn.commit()
     conn.close()
 
