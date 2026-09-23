@@ -140,7 +140,9 @@ def test_relatorio_loja_totais_e_ticket(ctx):
     assert rel["faturamento_total"] == 65.0
     assert rel["num_pedidos"] == 3
     assert rel["ticket_medio"] == round(65.0 / 3, 2)
-    assert rel["comissao_total"] == 3.5  # 2,00 + 1,50 + 0,00
+    # Comissão vista como despesa do dono: 2,00 + 1,50 do operador
+    # (a venda do admin não gera comissão nenhuma).
+    assert rel["comissoes_a_pagar"] == 3.5
 
 
 def test_relatorio_loja_por_operador_ordenado(ctx):
@@ -214,7 +216,14 @@ def test_relatorio_meu_do_admin_ve_so_o_proprio(ctx):
     rel = ctx["admin"].get(f"/api/relatorio/meu{PERIODO}").get_json()
     assert rel["num_pedidos"] == 1
     assert rel["faturamento"] == 30.0
+    # O admin é o dono e não recebe comissão: o front esconde o card.
     assert rel["comissao"] == 0.0
+    assert rel["mostra_comissao"] is False
+
+
+def test_relatorio_meu_do_operador_mostra_comissao(ctx):
+    rel = ctx["op"].get(f"/api/relatorio/meu{PERIODO}").get_json()
+    assert rel["mostra_comissao"] is True
 
 
 # ---------------------------------------------------------------------------

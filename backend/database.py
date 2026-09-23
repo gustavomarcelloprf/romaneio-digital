@@ -41,7 +41,9 @@ def init_db() -> None:
             nome          TEXT NOT NULL,
             login         TEXT NOT NULL,
             senha_hash    TEXT NOT NULL,
-            papel         TEXT NOT NULL DEFAULT 'operador' CHECK(papel IN ('admin','operador')),
+            -- 'gerente' já é aceito pelo schema, mas ainda não há UI para criá-lo:
+            -- a criação de usuário continua nascendo 'operador'.
+            papel         TEXT NOT NULL DEFAULT 'operador' CHECK(papel IN ('admin','operador','gerente')),
             taxa_comissao REAL NOT NULL DEFAULT 0,
             ativo         INTEGER NOT NULL DEFAULT 1,
             created_at    TEXT DEFAULT (datetime('now')),

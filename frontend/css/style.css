@@ -11,6 +11,7 @@
   --primary: #111827;
   --primary-text: #ffffff;
   --radius: 8px; /* Borda arredondada */
+  --sidebar-w: 220px;
 }
 
 * { box-sizing: border-box; }
@@ -47,21 +48,126 @@ h4 { font-size: 16px; margin: 0; }
   font-weight: 600;
 }
 
+/* ====== Shell da Aplicação (menu lateral + conteúdo) ====== */
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  flex: 0 0 var(--sidebar-w);
+  width: var(--sidebar-w);
+  background: var(--card);
+  border-right: 1px solid var(--line);
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+}
+.sidebar-brand {
+  font-weight: 700;
+  font-size: 18px;
+  padding: 0 10px;
+}
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.nav-item {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 15px;
+}
+.nav-item:hover { background: var(--bg); }
+.nav-item.is-active {
+  background: var(--primary);
+  color: var(--primary-text);
+  border-color: var(--primary);
+}
+
+.app-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 24px 40px;
+}
+
+.views {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+/* A gaveta e o botão-hambúrguer só existem no celular. */
+.menu-toggle { display: none; }
+.nav-overlay { display: none; }
+
 /* ====== Header da Aplicação ====== */
 .app-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   padding: 16px 0;
   margin-bottom: 16px;
   border-bottom: 1px solid var(--line);
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
 }
-.app-title {
+.header-identity {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 0;
-  font-size: 24px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.loja-nome {
+  font-weight: 700;
+  font-size: 20px;
+}
+
+/* ====== Responsivo: menu vira gaveta ====== */
+@media (max-width: 860px) {
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    z-index: 1100;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.12);
+  }
+  body.nav-open .sidebar { transform: translateX(0); }
+
+  .app-main { padding: 0 16px 32px; }
+
+  .menu-toggle {
+    display: inline-block;
+    width: auto;
+    font-size: 18px;
+    line-height: 1;
+    padding: 8px 14px;
+  }
+
+  .nav-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 1050;
+  }
+  .nav-overlay[hidden] { display: none; }
+
+  .loja-nome { font-size: 17px; }
 }
 
 /* ====== Componentes (Cards, Forms, etc.) ====== */
