@@ -412,6 +412,8 @@
                             <button class="btn-secondary btn-danger btn-sm remove-pedido-btn" data-id="${p.id}">Remover</button>
                             <button class="btn-secondary btn-sm png-pedido-btn" data-id="${p.id}">PNG</button>
                             <button class="btn-secondary btn-sm pdf-pedido-btn" data-id="${p.id}">PDF</button>
+                            <button class="btn-secondary btn-sm whatsapp-pedido-btn" data-id="${p.id}"
+                                title="Envia o romaneio em texto pelo WhatsApp. O WhatsApp não anexa arquivo pelo link: use PNG ou PDF para anexar manualmente.">WhatsApp</button>
                         </td>
                     </tr>`).join('')}
                 </tbody>
@@ -528,6 +530,47 @@
             editModal.classList.remove('is-visible');
         }
         state.pedidoEmEdicao = { id: null, itens: [] };
+    }
+
+    // ===== WhatsApp (link wa.me, sem API) =====
+    // Só dígitos, sem o 0 de operadora/DDD; com DDD (10–11 dígitos) ganha o 55.
+    // Número curto demais vira "sem telefone": o vendedor escolhe o contato.
+    function normalizarTelefoneBR(tel) {
+        let d = String(tel || '').replace(/\D/g, '').replace(/^0+/, '');
+        if (d.length === 10 || d.length === 11) d = '55' + d;
+        return d.length >= 12 ? d : '';
+    }
+
+    function montarMensagemWhatsApp(pedido, itens) {
+        const peso = n => Number(n || 0).toLocaleString('pt-BR', { maximumFractionDigits: 3 });
+        const linhas = [
+            `*${pedido.loja_nome || state.loja}*`,
+            `Romaneio #${pedido.id}`,
+            `Cliente: ${pedido.cliente_nome || '-'}`,
+            '',
+            'Itens:',
+            ...itens.map(it => `- ${it.cor || 'Sem cor'}: ${peso(it.peso_kg)} kg`),
+            '',
+            `*Total: ${fmtBRL(pedido.total)}*`,
+        ];
+        if (pedido.loja_pix_chave) linhas.push(`Chave PIX: ${pedido.loja_pix_chave}`);
+        return linhas.join('\n');
+    }
+
+    async function enviarWhatsApp(pedidoId) {
+        // A aba abre já no clique: aberta depois do await o navegador bloqueia o pop-up.
+        const aba = window.open('', '_blank');
+        try {
+            const { pedido, itens } = await jfetch(`/pedidos/${pedidoId}`);
+            const texto = encodeURIComponent(montarMensagemWhatsApp(pedido, itens || []));
+            const fone = normalizarTelefoneBR(pedido.cliente_telefone);
+            const url = `https://wa.me/${fone}?text=${texto}`;
+            if (aba) { aba.opener = null; aba.location.href = url; }
+            else window.open(url, '_blank', 'noopener');
+        } catch (err) {
+            aba?.close();
+            alert(`Erro ao montar mensagem do WhatsApp: ${err.message}`);
+        }
     }
 
     // ===== Event Listeners =====
@@ -743,6 +786,9 @@
             }
             else if (target.classList.contains('png-pedido-btn')) {
                 window.open(`/exportar/${pedidoId}?type=png`, '_blank');
+            }
+            else if (target.classList.contains('whatsapp-pedido-btn')) {
+                enviarWhatsApp(pedidoId);
             }
         });
 

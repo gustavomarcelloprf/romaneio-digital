@@ -193,10 +193,14 @@ def get_pedido(pedido_id: int) -> Optional[Dict[str, Any]]:
             p.loja AS loja_codigo, p.cliente_id, p.usuario_id,
             p.comissao_taxa, p.comissao_valor,
             COALESCE(c.nome, '') AS cliente_nome,
-            COALESCE(u.nome, '') AS vendedor_nome
+            COALESCE(c.telefone, '') AS cliente_telefone,
+            COALESCE(u.nome, '') AS vendedor_nome,
+            COALESCE(l.nome, p.loja) AS loja_nome,
+            COALESCE(l.pix_chave, '') AS loja_pix_chave
         FROM pedidos p
         LEFT JOIN clientes c ON c.id = p.cliente_id
         LEFT JOIN usuarios u ON u.id = p.usuario_id
+        LEFT JOIN lojas l ON l.codigo = p.loja
         WHERE p.id=?
     """, (pedido_id,))
     row = cur.fetchone()
