@@ -132,6 +132,35 @@
                         </div>
                         <hr class="divider">
                     </form>
+                    <!-- Entrada de mercadoria (recebimento): só gerente/admin.
+                         A planilha só preenche a tabela abaixo; nada é gravado
+                         até o "Confirmar entrada". -->
+                    <div id="entradaMercadoria" hidden>
+                        <h3>Entrada de mercadoria</h3>
+                        <div class="item-row">
+                            <input id="entradaFornecedor" placeholder="Fornecedor (opcional)">
+                            <input id="entradaData" type="date">
+                        </div>
+                        <div class="item-row">
+                            <input id="entradaArquivo" type="file" accept=".csv,.xlsx">
+                            <button type="button" id="btnLerPlanilha" class="btn-secondary btn-sm" style="width:auto;">Ler planilha</button>
+                        </div>
+                        <p class="muted">Planilha .csv ou .xlsx com as colunas <b>tecido</b>, <b>cor</b>, <b>peso</b> e, se quiser, <b>id_rolo</b>. As linhas lidas aparecem abaixo para conferência.</p>
+                        <div id="entradaMsg"></div>
+                        <datalist id="entradaTecidos"></datalist>
+                        <div class="table-responsive">
+                            <table class="table">
+                                <thead><tr><th>Tecido</th><th>Cor</th><th>Peso (kg)</th><th>Id do rolo</th><th></th></tr></thead>
+                                <tbody id="entradaLinhas"></tbody>
+                            </table>
+                        </div>
+                        <div class="item-row">
+                            <button type="button" id="btnEntradaAddLinha" class="btn-secondary btn-sm" style="width:auto;">+ Adicionar linha</button>
+                            <span id="entradaResumo" class="muted"></span>
+                            <button type="button" id="btnConfirmarEntrada" class="btn-primary btn-sm" style="width:auto;">Confirmar entrada</button>
+                        </div>
+                        <hr class="divider">
+                    </div>
                     <div id="estoqueWrap">
                         <!-- O conteúdo do estoque (cards de tecidos e cores) será renderizado aqui pelo JavaScript -->
                     </div>
