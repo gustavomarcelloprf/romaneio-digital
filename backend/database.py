@@ -139,6 +139,22 @@ def init_db() -> None:
         )
     """)
 
+    # Despesas da loja, importadas de planilha (categoria é texto livre).
+    # data é "YYYY-MM-DD", comparável por string com o filtro de período.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS despesas (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja        TEXT NOT NULL,
+            data        TEXT NOT NULL,
+            descricao   TEXT,
+            categoria   TEXT,
+            valor       REAL NOT NULL,
+            created_at  TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (loja) REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE CASCADE
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_despesas_loja_data ON despesas(loja, data)")
+
     conn.commit()
     conn.close()
 

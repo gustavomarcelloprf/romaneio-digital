@@ -172,6 +172,31 @@
                     <div id="usuariosWrap" class="table-responsive"></div>
                 </section>
 
+                <!-- ====== Tela: Despesas (somente admin: é dinheiro do dono) ====== -->
+                <section class="view card" id="view-despesas" hidden>
+                    <h2>Despesas</h2>
+                    <form id="formImportarDespesas">
+                        <h3>Importar planilha</h3>
+                        <p class="muted">Arquivo .xlsx ou .csv com as colunas <strong>data</strong>, <strong>descricao</strong>, <strong>categoria</strong> e <strong>valor</strong> (a categoria é livre).</p>
+                        <div class="item-row">
+                            <input name="arquivo" type="file" accept=".xlsx,.csv" required>
+                            <button type="submit" class="btn-primary" style="width: auto;">Importar</button>
+                        </div>
+                        <div id="despesasImportMsg" class="msg"></div>
+                    </form>
+                    <hr class="divider">
+                    <div class="periodo-bar" data-relatorio-periodo>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="hoje">Hoje</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="7d">7 dias</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn is-active" data-preset="30d">30 dias</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="mes">Este mês</button>
+                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
+                    </div>
+                    <div id="despesasCards" class="dash-cards"></div>
+                    <h3>Despesas do período</h3>
+                    <div id="despesasWrap" class="table-responsive"></div>
+                </section>
+
                 <!-- ====== Tela: Configurações (somente admin) ====== -->
                 <section class="view card" id="view-config" hidden>
                     <h2>Configurações</h2>

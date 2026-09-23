@@ -3,12 +3,14 @@ Brotli==1.1.0
 cffi==2.0.0
 click==8.3.0
 cssselect2==0.8.0
+et_xmlfile==2.0.0
 Flask==3.1.2
 Flask-Limiter==4.1.1
 fonttools==4.60.1
 itsdangerous==2.2.0
 Jinja2==3.1.6
 MarkupSafe==3.0.3
+openpyxl==3.1.5
 pillow==11.3.0
 pycparser==2.23
 pydyf==0.11.0
