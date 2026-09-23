@@ -4,10 +4,12 @@ import re
 import io
 import hmac
 import functools
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import sqlite3
 import sys
+import csv
+import unicodedata
 sys.path.append(str(Path(__file__).resolve().parent))
 
 # --- Bibliotecas de Terceiros (Flask, etc.) ---
@@ -18,6 +20,7 @@ from flask import (
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from openpyxl import load_workbook
 
 # --- Módulos do Projeto (Romaneio Digital) ---
 from database import (
@@ -807,6 +810,9 @@ def relatorio_loja():
                 (loja, loja, de, ate_ex),
             ).fetchall()
         ]
+
+        if ve_comissoes:
+            despesas_total, despesas_por_categoria = _despesas_resumo(conn, loja, de, ate_ex)
     finally:
         conn.close()
 
@@ -822,6 +828,11 @@ def relatorio_loja():
     )
     if ve_comissoes:
         payload["comissoes_a_pagar"] = comissoes_a_pagar
+        # Despesas e lucro são números do dono, com a mesma regra das
+        # comissões: o gerente não recebe nem a chave no JSON.
+        payload["despesas_total"] = despesas_total
+        payload["despesas_por_categoria"] = despesas_por_categoria
+        payload["lucro"] = round(faturamento_total - despesas_total, 2)
     return jsonify(**payload)
 
 @app.get("/api/relatorio/meu")
@@ -867,6 +878,224 @@ def relatorio_meu():
         mostra_comissao=recebe_comissao,
         ultimos_pedidos=ultimos,
     )
+
+# -----------------------------------------------------------------------------
+# API: Despesas (somente admin) — importação de planilha xlsx/csv
+# -----------------------------------------------------------------------------
+# Despesa é dinheiro que SAI do bolso do dono, a mesma natureza da comissão a
+# pagar: reaproveita a capacidade já existente em vez de criar uma nova.
+PERM_DESPESAS = "relatorio_comissoes"
+DESPESAS_MAX_BYTES = 5 * 1024 * 1024
+DESPESAS_MAX_LINHAS = 5000
+DESPESAS_COLUNAS = ("data", "descricao", "categoria", "valor")
+
+
+def _despesas_resumo(conn, loja, de, ate_ex):
+    """(total, [{categoria, total}]) das despesas da loja no período."""
+    por_categoria = [
+        {"categoria": r["categoria"], "total": round(r["total"], 2)}
+        for r in conn.execute(
+            "SELECT COALESCE(NULLIF(TRIM(categoria), ''), 'Sem categoria') AS categoria, "
+            "SUM(valor) AS total FROM despesas "
+            "WHERE loja = ? AND data >= ? AND data < ? "
+            "GROUP BY 1 ORDER BY total DESC",
+            (loja, de, ate_ex),
+        ).fetchall()
+    ]
+    total = round(sum(c["total"] for c in por_categoria), 2)
+    return total, por_categoria
+
+
+def _normaliza_coluna(nome):
+    """'Descrição ' -> 'descricao': cabeçalho sem acento, caixa ou espaços."""
+    s = unicodedata.normalize("NFKD", str(nome or "")).encode("ascii", "ignore").decode()
+    return s.strip().lower()
+
+
+def _parse_data_despesa(val):
+    """Aceita date/datetime (xlsx), 'YYYY-MM-DD', 'DD/MM/YYYY' ou 'DD-MM-YYYY'."""
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m-%d")
+    if isinstance(val, date):
+        return val.isoformat()
+    s = str(val or "").strip()
+    # Datas do Excel exportadas em CSV às vezes vêm com a hora junto.
+    s = s.split(" ")[0].split("T")[0]
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_valor_despesa(val):
+    """Número da planilha em pt-BR ('1.234,56', 'R$ 45,90') ou ponto decimal ('45.90').
+
+    Diferente de _ptbr_to_float, não descarta o ponto às cegas: CSVs gerados
+    por sistemas costumam usar '45.90', que viraria 4590.
+    """
+    if isinstance(val, bool) or val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = re.sub(r"[^\d,.\-]", "", str(val).strip())
+    if not s:
+        return None
+    if "," in s and "." in s:
+        # O separador que aparece por último é o decimal.
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif re.fullmatch(r"-?\d{1,3}(\.\d{3})+", s):
+        # '1.500' em planilha brasileira é mil e quinhentos.
+        s = s.replace(".", "")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _linhas_csv(conteudo):
+    try:
+        texto = conteudo.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        # Excel em português salva CSV em Windows-1252.
+        texto = conteudo.decode("cp1252", errors="replace")
+    try:
+        dialeto = csv.Sniffer().sniff(texto[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialeto = csv.excel
+    return list(csv.reader(io.StringIO(texto), dialeto))
+
+
+def _linhas_xlsx(conteudo):
+    wb = load_workbook(io.BytesIO(conteudo), read_only=True, data_only=True)
+    try:
+        return [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
+    finally:
+        wb.close()
+
+
+@app.post("/api/despesas/importar")
+@require_login
+@require_perm(PERM_DESPESAS)
+def despesas_importar():
+    loja = current_loja()
+    arquivo = request.files.get("arquivo")
+    if not arquivo or not arquivo.filename:
+        return jsonify(error="Envie a planilha no campo 'arquivo'."), 400
+    nome = arquivo.filename.lower()
+    conteudo = arquivo.read(DESPESAS_MAX_BYTES + 1)
+    if len(conteudo) > DESPESAS_MAX_BYTES:
+        return jsonify(error="Planilha muito grande (máx. 5 MB)."), 400
+
+    try:
+        if nome.endswith(".csv"):
+            linhas = _linhas_csv(conteudo)
+        elif nome.endswith(".xlsx"):
+            linhas = _linhas_xlsx(conteudo)
+        else:
+            return jsonify(error="Formato não suportado: use .xlsx ou .csv."), 400
+    except Exception:
+        return jsonify(error="Não foi possível ler a planilha. Verifique o arquivo."), 400
+
+    if not linhas:
+        return jsonify(error="Planilha vazia."), 400
+    cabecalho = [_normaliza_coluna(c) for c in linhas[0]]
+    faltando = [c for c in ("data", "valor") if c not in cabecalho]
+    if faltando:
+        return jsonify(
+            error=f"Coluna(s) obrigatória(s) ausente(s): {', '.join(faltando)}. "
+                  f"Esperado: {', '.join(DESPESAS_COLUNAS)}."
+        ), 400
+    idx = {c: cabecalho.index(c) for c in DESPESAS_COLUNAS if c in cabecalho}
+    if len(linhas) - 1 > DESPESAS_MAX_LINHAS:
+        return jsonify(error=f"Máximo de {DESPESAS_MAX_LINHAS} linhas por importação."), 400
+
+    def _cel(row, col):
+        i = idx.get(col)
+        return row[i] if i is not None and i < len(row) else None
+
+    validas, erros = [], []
+    # Linha 1 é o cabeçalho: numeramos como o usuário vê na planilha.
+    for n, row in enumerate(linhas[1:], start=2):
+        if all(v is None or str(v).strip() == "" for v in row):
+            continue
+        data_raw, valor_raw = _cel(row, "data"), _cel(row, "valor")
+        data_iso = _parse_data_despesa(data_raw)
+        valor = _parse_valor_despesa(valor_raw)
+        problemas = []
+        if not data_iso:
+            problemas.append(f"data inválida ({data_raw!s})" if data_raw not in (None, "") else "data vazia")
+        if valor is None:
+            problemas.append(f"valor inválido ({valor_raw!s})" if valor_raw not in (None, "") else "valor vazio")
+        elif valor <= 0:
+            problemas.append("valor deve ser maior que zero")
+        if problemas:
+            erros.append({"linha": n, "erro": "; ".join(problemas)})
+            continue
+        descricao = str(_cel(row, "descricao") or "").strip()
+        categoria = str(_cel(row, "categoria") or "").strip()
+        validas.append((loja, data_iso, descricao, categoria, round(valor, 2)))
+
+    conn = get_conn()
+    try:
+        conn.executemany(
+            "INSERT INTO despesas (loja, data, descricao, categoria, valor) VALUES (?, ?, ?, ?, ?)",
+            validas,
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+
+    return jsonify(
+        importadas=len(validas),
+        erros=erros,
+        total=round(sum(v[4] for v in validas), 2),
+    ), 200
+
+
+@app.get("/api/despesas")
+@require_login
+@require_perm(PERM_DESPESAS)
+def despesas_listar():
+    loja = current_loja()
+    de, ate, ate_ex = _periodo_from_args()
+    conn = get_conn()
+    try:
+        despesas = [dict(r) for r in conn.execute(
+            "SELECT id, data, descricao, categoria, valor FROM despesas "
+            "WHERE loja = ? AND data >= ? AND data < ? ORDER BY data DESC, id DESC",
+            (loja, de, ate_ex),
+        ).fetchall()]
+        total, por_categoria = _despesas_resumo(conn, loja, de, ate_ex)
+    finally:
+        conn.close()
+    return jsonify(periodo={"de": de, "ate": ate}, despesas=despesas,
+                   total=total, por_categoria=por_categoria)
+
+
+@app.delete("/api/despesas/<int:despesa_id>")
+@require_login
+@require_perm(PERM_DESPESAS)
+def despesa_delete(despesa_id):
+    loja = current_loja()
+    conn = get_conn()
+    try:
+        cur = conn.execute("DELETE FROM despesas WHERE id = ? AND loja = ?", (despesa_id, loja))
+        if cur.rowcount == 0:
+            return jsonify(error="Despesa não encontrada."), 404
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify(ok=True)
 
 # -----------------------------------------------------------------------------
 # API: PIX e Exportações

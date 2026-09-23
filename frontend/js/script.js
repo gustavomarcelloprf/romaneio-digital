@@ -26,6 +26,8 @@
         { id: "estoque",       label: "Estoque",       perm: "estoque_ver" },
         { id: "clientes",      label: "Clientes",      perm: "clientes_gerir" },
         { id: "equipe",        label: "Equipe",        perm: "usuarios_gerir" },
+        // Despesas são dinheiro do dono, como as comissões a pagar.
+        { id: "despesas",      label: "Despesas",      perm: "relatorio_comissoes" },
         { id: "config",        label: "Configurações", perm: "config_editar" },
     ];
 
@@ -59,6 +61,7 @@
         else if (id === "estoque") loadStock();
         else if (id === "dashboard" || id === "minhas-vendas") loadRelatorios();
         else if (id === "equipe") loadUsuarios();
+        else if (id === "despesas") loadDespesas();
     }
 
     function irPara(id, { atualizarHash = true } = {}) {
@@ -249,8 +252,8 @@
     }
 
     // --- Dashboards (Fase 1) ---
-    function statCard(label, value) {
-        return `<div class="stat-card"><span class="stat-label">${esc(label)}</span><span class="stat-value">${esc(value)}</span></div>`;
+    function statCard(label, value, extraClass = '') {
+        return `<div class="stat-card"><span class="stat-label">${esc(label)}</span><span class="stat-value ${esc(extraClass)}">${esc(value)}</span></div>`;
     }
 
     // Barra proporcional feita só com divs/CSS (sem libs de gráfico).
@@ -280,13 +283,17 @@
         // Comissão é o que a loja tem A PAGAR, e só o dono (admin) vê esse
         // número: o backend simplesmente não manda o campo para o gerente.
         const veComissoes = rel.comissoes_a_pagar !== undefined;
+        // Despesas e lucro seguem a mesma regra: só chegam para o admin.
+        const veLucro = rel.lucro !== undefined;
         const cards = $("#dashCards");
         if (cards) {
             cards.innerHTML =
                 statCard("Faturamento", fmtBRL(rel.faturamento_total)) +
                 statCard("Pedidos", rel.num_pedidos) +
                 statCard("Ticket médio", fmtBRL(rel.ticket_medio)) +
-                (veComissoes ? statCard("Comissões a pagar", fmtBRL(rel.comissoes_a_pagar)) : '');
+                (veComissoes ? statCard("Comissões a pagar", fmtBRL(rel.comissoes_a_pagar)) : '') +
+                (veLucro ? statCard("Despesas", fmtBRL(rel.despesas_total)) : '') +
+                (veLucro ? statCard("Lucro", fmtBRL(rel.lucro), rel.lucro < 0 ? 'is-negativo' : '') : '');
         }
         const opWrap = $("#dashOperadoresWrap");
         if (opWrap) {
@@ -360,6 +367,61 @@
         } catch (err) {
             console.error("Erro ao carregar relatórios:", err);
         }
+    }
+
+    // --- Despesas (somente admin) ---
+    function fmtDataCurta(iso) {
+        // "YYYY-MM-DD" -> "DD/MM/YYYY" sem passar por Date (evita fuso).
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+        return m ? `${m[3]}/${m[2]}/${m[1]}` : String(iso || '');
+    }
+
+    function renderDespesas(res) {
+        const cards = $("#despesasCards");
+        if (cards) {
+            const cats = res.por_categoria || [];
+            cards.innerHTML =
+                statCard("Total do período", fmtBRL(res.total)) +
+                cats.slice(0, 3).map(c => statCard(c.categoria, fmtBRL(c.total))).join('');
+        }
+        const wrap = $("#despesasWrap");
+        if (!wrap) return;
+        const lista = res.despesas || [];
+        wrap.innerHTML = lista.length ? `
+            <table class="table">
+                <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Valor</th><th>Ação</th></tr></thead>
+                <tbody>${lista.map(d => `
+                    <tr>
+                        <td>${esc(fmtDataCurta(d.data))}</td>
+                        <td>${esc(d.descricao)}</td>
+                        <td>${esc(d.categoria)}</td>
+                        <td>${fmtBRL(d.valor)}</td>
+                        <td><button type="button" class="btn-secondary btn-danger btn-sm remove-despesa-btn" data-id="${esc(d.id)}">Remover</button></td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>` : '<p class="muted" style="padding:12px;">Nenhuma despesa no período.</p>';
+    }
+
+    async function loadDespesas() {
+        if (!pode("relatorio_comissoes")) return;
+        try {
+            const res = await jfetch(`/api/despesas?${periodoQuery()}`);
+            if (res) renderDespesas(res);
+        } catch (err) {
+            const wrap = $("#despesasWrap");
+            if (wrap) wrap.innerHTML = `<p class="msg erro">Erro ao carregar despesas: ${esc(err.message)}</p>`;
+        }
+    }
+
+    function renderResultadoImportacao(res) {
+        const msg = $("#despesasImportMsg");
+        if (!msg) return;
+        const erros = res.erros || [];
+        msg.className = `msg ${res.importadas ? 'ok' : 'erro'}`;
+        msg.innerHTML =
+            `${esc(res.importadas)} despesa(s) importada(s), total ${esc(fmtBRL(res.total))}.` +
+            (erros.length ? ` ${esc(erros.length)} linha(s) com erro:
+                <ul class="import-erros">${erros.map(e => `<li>Linha ${esc(e.linha)}: ${esc(e.erro)}</li>`).join('')}</ul>` : '');
     }
 
     async function loadUsuarios() {
@@ -575,7 +637,43 @@
                 document.querySelectorAll(".periodo-btn").forEach(b =>
                     b.classList.toggle("is-active", b.dataset.preset === state.periodo));
                 loadRelatorios();
+                loadDespesas();
             });
+        });
+
+        // Upload de planilha: multipart, então sem o Content-Type JSON do jfetch.
+        $("#formImportarDespesas")?.addEventListener("submit", async e => {
+            e.preventDefault();
+            const msg = $("#despesasImportMsg");
+            msg.className = "msg";
+            msg.textContent = "Importando...";
+            try {
+                const res = await fetch("/api/despesas/importar", {
+                    method: "POST",
+                    credentials: "include",
+                    body: new FormData(e.target),
+                });
+                if (res.status === 401) { window.location.href = "/acesso"; return; }
+                const json = await res.json();
+                if (!res.ok) throw new Error(json.error || `Erro HTTP ${res.status}`);
+                renderResultadoImportacao(json);
+                e.target.reset();
+                loadDespesas();
+                loadRelatorios();
+            } catch (err) {
+                msg.className = "msg erro";
+                msg.textContent = `Erro: ${err.message}`;
+            }
+        });
+
+        $("#despesasWrap")?.addEventListener("click", async e => {
+            const btn = e.target.closest(".remove-despesa-btn");
+            if (!btn || !confirm("Remover esta despesa?")) return;
+            try {
+                await jfetch(`/api/despesas/${btn.dataset.id}`, { method: "DELETE" });
+                loadDespesas();
+                loadRelatorios();
+            } catch (err) { alert(err.message); }
         });
 
         logoutBtn?.addEventListener("click", async () => {
