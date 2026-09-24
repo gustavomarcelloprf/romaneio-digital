@@ -1153,7 +1153,9 @@
                 cliente_id: $("#clienteId").value,
                 tecido: $("#tecido").value, preco_unitario: $("#preco").value,
                 desconto: $("#desconto").value, itens: state.novoPedido.itens,
-                descontar_estoque: !isOrcamento && $("#descontar_estoque").checked,
+                // O estado do checkbox é sempre enviado (mesmo para orçamento):
+                // vira a intenção gravada, que a conversão respeita depois.
+                descontar_estoque: $("#descontar_estoque").checked,
                 pago: !$("#fiado").checked,
                 is_orcamento: isOrcamento
             };

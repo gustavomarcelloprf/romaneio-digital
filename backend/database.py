@@ -262,6 +262,9 @@ def init_db() -> None:
                      "TEXT NOT NULL DEFAULT 'pedido' CHECK(status IN ('orcamento','pedido'))")
     # Alerta de estoque: 0 = sem mínimo definido (nunca alerta).
     _garantir_coluna(cur, "estoque_cores", "estoque_minimo", "REAL NOT NULL DEFAULT 0")
+    # Intenção de baixa gravada no pedido/orçamento: um orçamento de venda
+    # casada (tecido não rastreado) nasce com 0 para a conversão não baixar.
+    _garantir_coluna(cur, "pedidos", "descontar_estoque", "INTEGER NOT NULL DEFAULT 1")
 
     conn.commit()
     conn.close()
