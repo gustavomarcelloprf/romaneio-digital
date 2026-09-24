@@ -191,11 +191,12 @@
                     <form id="formUsuario" class="grid">
                         <div class="form-group"><label>Nome *<input name="nome" required></label></div>
                         <div class="form-group"><label>Login *<input name="login" required autocomplete="off"></label></div>
-                        <div class="form-group"><label>Senha *<input name="senha" type="password" required autocomplete="new-password"></label></div>
                         <div class="form-group"><label>Comissão (%)<input name="taxa_comissao" inputmode="decimal" placeholder="Ex.: 2,5"></label></div>
                         <button type="submit" class="btn-primary" style="grid-column: 1 / -1;">Criar Operador</button>
                     </form>
                     <div id="usuarioMsg" class="msg"></div>
+                    <!-- Sem senha na criação: o operador define a dele pelo link do convite. -->
+                    <div id="conviteBox" class="form-group" hidden></div>
                     <hr class="divider">
                     <h3>Usuários da loja</h3>
                     <div id="usuariosWrap" class="table-responsive"></div>
@@ -283,6 +284,6 @@
     </div>
 
     <noscript>Ative o JavaScript para usar o sistema.</noscript>
-    <script src="../js/script.js?v=33"></script>
+    <script src="../js/script.js?v=34"></script>
 </body>
 </html>

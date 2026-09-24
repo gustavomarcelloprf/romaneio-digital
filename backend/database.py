@@ -40,18 +40,33 @@ def init_db() -> None:
             loja          TEXT NOT NULL,
             nome          TEXT NOT NULL,
             login         TEXT NOT NULL,
-            senha_hash    TEXT NOT NULL,
+            -- NULL enquanto o convite não for aceito: sem senha não há login.
+            senha_hash    TEXT,
             -- 'gerente' já é aceito pelo schema, mas ainda não há UI para criá-lo:
             -- a criação de usuário continua nascendo 'operador'.
             papel         TEXT NOT NULL DEFAULT 'operador' CHECK(papel IN ('admin','operador','gerente')),
             taxa_comissao REAL NOT NULL DEFAULT 0,
             ativo         INTEGER NOT NULL DEFAULT 1,
+            -- Convite de primeiro acesso: o admin cria o operador sem senha e
+            -- repassa o link /convite/<token>; o operador define a própria senha.
+            -- convite_expira é UTC "YYYY-MM-DD HH:MM:SS" (mesmo formato de datetime('now')).
+            convite_token  TEXT UNIQUE,
+            convite_expira TEXT,
             created_at    TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (loja) REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE CASCADE,
             UNIQUE(loja, login)
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_usuarios_loja ON usuarios(loja)")
+    # Bancos criados antes do convite: acrescenta as colunas (o ADD COLUMN do
+    # SQLite não aceita UNIQUE, daí o índice único à parte). Tornar senha_hash
+    # nullable num banco antigo exige recriá-lo.
+    colunas = {r["name"] for r in cur.execute("PRAGMA table_info(usuarios)")}
+    if "convite_token" not in colunas:
+        cur.execute("ALTER TABLE usuarios ADD COLUMN convite_token TEXT")
+    if "convite_expira" not in colunas:
+        cur.execute("ALTER TABLE usuarios ADD COLUMN convite_expira TEXT")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_usuarios_convite ON usuarios(convite_token)")
     
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clientes (

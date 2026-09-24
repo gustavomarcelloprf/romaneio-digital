@@ -62,10 +62,15 @@ def ctx():
 
 
 def _criar_operador(admin_client, login="operador", taxa="5"):
-    return admin_client.post(
+    # O operador nasce sem senha; aceita o convite para poder logar.
+    resp = admin_client.post(
         "/usuarios",
-        json={"nome": "Operador Um", "login": login, "senha": SENHA, "taxa_comissao": taxa},
+        json={"nome": "Operador Um", "login": login, "taxa_comissao": taxa},
     )
+    if resp.status_code == 201:
+        aceite = app.test_client().post(resp.get_json()["convite_path"], json={"senha": SENHA})
+        assert aceite.status_code == 200
+    return resp
 
 
 def _login_operador(login="operador"):
