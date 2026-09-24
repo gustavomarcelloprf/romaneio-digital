@@ -87,6 +87,7 @@ def init_db() -> None:
             comissao_taxa  REAL NOT NULL DEFAULT 0,
             comissao_valor REAL NOT NULL DEFAULT 0,
             observacoes  TEXT,
+            status       TEXT NOT NULL DEFAULT 'pedido' CHECK(status IN ('orcamento','pedido')),
             created_at   TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE SET NULL,
             FOREIGN KEY (loja)       REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE SET NULL,
@@ -133,6 +134,7 @@ def init_db() -> None:
             nome_cor      TEXT NOT NULL,
             peso_kg       REAL NOT NULL DEFAULT 0,
             qtd_pecas     INTEGER NOT NULL DEFAULT 0,
+            estoque_minimo REAL NOT NULL DEFAULT 0,
             created_at    TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (tecido_id) REFERENCES estoque_tecidos(id) ON DELETE CASCADE,
             UNIQUE(tecido_id, nome_cor)
@@ -189,8 +191,22 @@ def init_db() -> None:
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_rolos_entrada ON rolos(entrada_id)")
 
+    # Colunas novas em tabelas que já existem: CREATE TABLE IF NOT EXISTS não
+    # altera um banco antigo, então elas entram via ALTER quando faltarem.
+    # Orçamento ('orcamento') não baixa estoque nem conta em relatório até
+    # virar 'pedido'.
+    _garantir_coluna(cur, "pedidos", "status",
+                     "TEXT NOT NULL DEFAULT 'pedido' CHECK(status IN ('orcamento','pedido'))")
+    # Alerta de estoque: 0 = sem mínimo definido (nunca alerta).
+    _garantir_coluna(cur, "estoque_cores", "estoque_minimo", "REAL NOT NULL DEFAULT 0")
+
     conn.commit()
     conn.close()
+
+def _garantir_coluna(cur: sqlite3.Cursor, tabela: str, coluna: str, ddl: str) -> None:
+    colunas = [r[1] for r in cur.execute(f"PRAGMA table_info({tabela})").fetchall()]
+    if coluna not in colunas:
+        cur.execute(f"ALTER TABLE {tabela} ADD COLUMN {coluna} {ddl}")
 
 # -------- Funções de Acesso a Dados (sem alterações, por enquanto) --------
 def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
@@ -241,7 +257,7 @@ def get_pedido(pedido_id: int) -> Optional[Dict[str, Any]]:
         SELECT
             p.id, p.data_iso, p.tecido, p.quantidade, p.preco_unitario, p.total, p.desconto,
             p.loja AS loja_codigo, p.cliente_id, p.usuario_id,
-            p.comissao_taxa, p.comissao_valor,
+            p.comissao_taxa, p.comissao_valor, p.status,
             COALESCE(c.nome, '') AS cliente_nome,
             COALESCE(c.telefone, '') AS cliente_telefone,
             COALESCE(u.nome, '') AS vendedor_nome,

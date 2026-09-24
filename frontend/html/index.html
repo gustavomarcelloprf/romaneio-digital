@@ -64,9 +64,15 @@
                                 <strong id="totalPreview" class="pill">R$ 0,00</strong>
                             </div>
                             <button type="submit" class="btn-primary">Salvar Pedido</button>
+                            <button type="submit" class="btn-secondary" data-orcamento="1">Salvar como orçamento</button>
+                            <p class="muted"><small>Orçamento <b>não baixa o estoque</b> e não entra nas vendas nem na comissão. O estoque só é descontado quando você converter o orçamento em pedido.</small></p>
                         </div>
                         <div id="msgPedido" class="msg"></div>
                     </form>
+
+                    <h3>Orçamentos</h3>
+                    <p class="muted"><small>Orçamentos em aberto (sem baixa de estoque). "Converter em pedido" desconta o estoque e congela a comissão com a taxa atual do vendedor.</small></p>
+                    <div id="orcamentosWrap" class="table-responsive"></div>
                 </section>
 
                 <!-- ====== Tela: Pedidos ====== -->

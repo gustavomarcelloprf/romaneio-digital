@@ -473,3 +473,18 @@ button {
 .modal-close-btn:hover {
     color: #333;
 }
+
+/* ====== Alerta de estoque mínimo ====== */
+.estoque-baixo td { background: #fef2f2; }
+.estoque-baixo td:first-child { box-shadow: inset 3px 0 0 #dc2626; }
+.tag-alerta {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #b91c1c;
+  background: #fee2e2;
+}
+.estoque-alerta-resumo { color: #b91c1c; }

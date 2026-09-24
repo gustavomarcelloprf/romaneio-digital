@@ -57,7 +57,8 @@
     // Carregamento sob demanda: ao abrir uma tela, seus dados são
     // reatualizados (o resto continua como está).
     function aoAbrirTela(id) {
-        if (id === "pedidos") loadOrders();
+        if (id === "vender") loadOrcamentos();
+        else if (id === "pedidos") loadOrders();
         else if (id === "clientes") loadClients();
         else if (id === "estoque") loadStock();
         else if (id === "dashboard" || id === "minhas-vendas") loadRelatorios();
@@ -486,6 +487,35 @@
         }
     }
 
+    // Orçamentos: pedidos com status 'orcamento' (sem baixa de estoque).
+    async function loadOrcamentos() {
+        const wrap = $("#orcamentosWrap");
+        if (!wrap || !pode("vender")) return;
+        try {
+            const orcamentos = await jfetch("/pedidos?status=orcamento");
+            wrap.innerHTML = orcamentos.length ? `
+            <table class="table">
+                <thead><tr><th>ID</th><th>Cliente</th><th>Tecido</th><th>Vendedor</th><th>Data</th><th>Total</th><th>Ações</th></tr></thead>
+                <tbody>${orcamentos.map(o => `
+                    <tr>
+                        <td>${esc(o.id)}</td>
+                        <td>${esc(o.cliente_nome)}</td>
+                        <td>${esc(o.tecido)}</td>
+                        <td>${esc(o.vendedor_nome || '')}</td>
+                        <td>${esc(new Date(o.data_iso).toLocaleString('pt-BR'))}</td>
+                        <td>${esc(fmtBRL(o.total))}</td>
+                        <td class="actions">
+                            <button class="btn-primary btn-sm converter-orcamento-btn" data-id="${esc(o.id)}" style="width:auto;">Converter em pedido</button>
+                            <button class="btn-secondary btn-danger btn-sm remove-orcamento-btn" data-id="${esc(o.id)}">Remover</button>
+                        </td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>` : '<p class="muted">Nenhum orçamento em aberto.</p>';
+        } catch (err) {
+            wrap.innerHTML = `<p class="msg erro">Erro ao carregar orçamentos: ${esc(err.message)}</p>`;
+        }
+    }
+
     function renderEstoque(estoque) {
         const estoqueWrap = $("#estoqueWrap");
         if (!estoqueWrap) return;
@@ -499,8 +529,12 @@
             return;
         }
 
-        const colunas = podeMutar ? 4 : 3;
-        estoqueWrap.innerHTML = estoque.map(tecido => `
+        const colunas = podeMutar ? 5 : 4;
+        const emAlerta = estoque.reduce((n, t) => n + t.cores.filter(c => c.abaixo_minimo).length, 0);
+        const resumo = emAlerta
+            ? `<p class="msg estoque-alerta-resumo"><strong>${esc(emAlerta)} cor(es) no ou abaixo do estoque mínimo.</strong></p>`
+            : '';
+        estoqueWrap.innerHTML = resumo + estoque.map(tecido => `
             <div class="estoque-card">
                 <div class="estoque-header">
                     <h4>${esc(tecido.nome_tecido)}</h4>
@@ -508,13 +542,18 @@
                 </div>
                 <div class="table-responsive">
                     <table class="table">
-                        <thead><tr><th>Cor</th><th>Peso (kg)</th><th>Peças</th>${podeMutar ? '<th>Ação</th>' : ''}</tr></thead>
+                        <thead><tr><th>Cor</th><th>Peso (kg)</th><th>Peças</th><th>Mínimo (kg)</th>${podeMutar ? '<th>Ação</th>' : ''}</tr></thead>
                         <tbody>
                             ${tecido.cores.length ? tecido.cores.map(cor => `
-                                <tr>
-                                    <td>${esc(cor.nome_cor)}</td>
+                                <tr class="${cor.abaixo_minimo ? 'estoque-baixo' : ''}">
+                                    <td>${esc(cor.nome_cor)}${cor.abaixo_minimo ? '<span class="tag-alerta">Repor</span>' : ''}</td>
                                     <td>${esc(numberToPtbr(cor.peso_kg))}</td>
                                     <td>${esc(cor.qtd_pecas)}</td>
+                                    <td>${podeMutar ? `
+                                        <form class="form-minimo-cor item-row" data-id="${esc(cor.id)}">
+                                            <input name="estoque_minimo" inputmode="decimal" value="${esc(cor.estoque_minimo ? numberToPtbr(cor.estoque_minimo) : '')}" placeholder="0 = sem alerta" style="max-width:110px;">
+                                            <button type="submit" class="btn-secondary btn-sm">Definir</button>
+                                        </form>` : esc(cor.estoque_minimo ? numberToPtbr(cor.estoque_minimo) : '—')}</td>
                                     ${podeMutar ? `<td class="actions">
                                         <button class="btn-secondary btn-sm adjust-cor-btn" data-id="${cor.id}" data-nome="${esc(cor.nome_cor)}" data-peso="${esc(cor.peso_kg)}" data-pecas="${esc(cor.qtd_pecas)}">Ajustar</button>
                                         <button class="btn-secondary btn-danger btn-sm remove-cor-btn" data-id="${cor.id}">X</button>
@@ -682,6 +721,7 @@
             await Promise.all([
                 loadClients(),
                 loadOrders(),
+                loadOrcamentos(),
                 loadStock(),
                 loadRelatorios()
             ]);
@@ -907,11 +947,14 @@
         formPedido?.addEventListener("submit", async e => {
             e.preventDefault();
             if (state.novoPedido.itens.length === 0) return alert("Adicione pelo menos um item ao pedido.");
+            // "Salvar como orçamento" é o segundo botão submit do form.
+            const isOrcamento = e.submitter?.dataset.orcamento === "1";
             const payload = {
                 cliente_id: $("#clienteId").value,
                 tecido: $("#tecido").value, preco_unitario: $("#preco").value,
                 desconto: $("#desconto").value, itens: state.novoPedido.itens,
-                descontar_estoque: $("#descontar_estoque").checked
+                descontar_estoque: !isOrcamento && $("#descontar_estoque").checked,
+                is_orcamento: isOrcamento
             };
             try {
                 await jfetch("/pedidos", { method: "POST", body: JSON.stringify(payload) });
@@ -919,11 +962,42 @@
                 formPedido.reset();
                 renderItens(state.novoPedido.itens, itensWrap, 'remove-item');
                 updateTotalPreview(state.novoPedido.itens, inpPreco, inpDesconto, totalPreviewEl);
-                loadOrders();
-                loadRelatorios();
-                if (payload.descontar_estoque) loadStock();
-                alert('Pedido salvo com sucesso!');
-            } catch (err) { alert(`Erro ao salvar pedido: ${err.message}`); }
+                if (isOrcamento) {
+                    loadOrcamentos();
+                    alert('Orçamento salvo! O estoque NÃO foi descontado.');
+                } else {
+                    loadOrders();
+                    loadRelatorios();
+                    if (payload.descontar_estoque) loadStock();
+                    alert('Pedido salvo com sucesso!');
+                }
+            } catch (err) { alert(`Erro ao salvar: ${err.message}`); }
+        });
+
+        $("#orcamentosWrap")?.addEventListener('click', async e => {
+            const btn = e.target.closest('button');
+            if (!btn?.dataset.id) return;
+            if (btn.classList.contains('converter-orcamento-btn')) {
+                if (!confirm('Converter este orçamento em pedido? O estoque será descontado agora.')) return;
+                btn.disabled = true;
+                try {
+                    await jfetch(`/pedidos/${btn.dataset.id}/converter`, { method: 'POST' });
+                    loadOrcamentos();
+                    loadOrders();
+                    loadStock();
+                    loadRelatorios();
+                    alert('Orçamento convertido em pedido.');
+                } catch (err) {
+                    btn.disabled = false;
+                    alert(`Não foi possível converter: ${err.message}`);
+                }
+            } else if (btn.classList.contains('remove-orcamento-btn')) {
+                if (!confirm('Remover este orçamento?')) return;
+                try {
+                    await jfetch(`/pedidos/${btn.dataset.id}`, { method: 'DELETE' });
+                    loadOrcamentos();
+                } catch (err) { alert(`Erro: ${err.message}`); }
+            }
         });
 
         formPix?.addEventListener("submit", async e => {
@@ -1065,6 +1139,19 @@
         });
 
         estoqueWrap?.addEventListener('submit', async e => {
+            if (e.target.classList.contains('form-minimo-cor')) {
+                e.preventDefault();
+                const valor = e.target.elements.estoque_minimo.value.trim() || '0';
+                const n = ptbrToNumber(valor);
+                if (n === null || n < 0) return alert('Mínimo inválido. Use 0 para desligar o alerta.');
+                try {
+                    await jfetch(`/api/estoque/cores/${e.target.dataset.id}/minimo`, {
+                        method: 'PUT', body: JSON.stringify({ estoque_minimo: valor })
+                    });
+                    loadStock();
+                } catch (err) { alert(`Erro ao definir mínimo: ${err.message}`); }
+                return;
+            }
             if (e.target.classList.contains('form-add-cor')) {
                 e.preventDefault();
                 const form = e.target;
