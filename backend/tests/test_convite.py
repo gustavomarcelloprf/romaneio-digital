@@ -3,7 +3,6 @@
 # consegue logar. Inclui a capacidade semântica despesas_gerir.
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -16,9 +15,6 @@ import database
 # app.py exige SECRET_KEY e ADMIN_TOKEN no import (boot fail-fast).
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
-
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
 
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
@@ -39,7 +35,7 @@ def _login(login, senha):
 def _usuario_db(login):
     conn = database.get_conn()
     row = conn.execute(
-        "SELECT senha_hash, convite_token, convite_expira, ativo FROM usuarios WHERE loja=? AND login=?",
+        "SELECT senha_hash, convite_token, convite_expira, ativo FROM usuarios WHERE loja=%s AND login=%s",
         (LOJA, login),
     ).fetchone()
     conn.close()
@@ -49,10 +45,6 @@ def _usuario_db(login):
 @pytest.fixture()
 def admin():
     """Loja aprovada com o admin logado."""
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
-
     c = app.test_client()
     resp = c.post(
         "/auth/signup",
@@ -60,13 +52,12 @@ def admin():
     )
     assert resp.status_code == 201
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", (LOJA,))
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", (LOJA,))
     conn.commit()
     conn.close()
     c, resp = _login("admin", SENHA)
     assert resp.status_code == 200
     yield c
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _criar_operador(admin, login="operador"):
@@ -200,7 +191,7 @@ def test_token_expirado_recusado(admin):
     corpo = _criar_operador(admin)
     conn = database.get_conn()
     conn.execute(
-        "UPDATE usuarios SET convite_expira = '2000-01-01 00:00:00' WHERE loja=? AND login='operador'",
+        "UPDATE usuarios SET convite_expira = '2000-01-01 00:00:00' WHERE loja=%s AND login='operador'",
         (LOJA,),
     )
     conn.commit()

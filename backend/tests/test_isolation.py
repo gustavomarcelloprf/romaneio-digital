@@ -3,7 +3,6 @@
 # ler/alterar/apagar dados vinculados à loja A.
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -19,46 +18,36 @@ import database
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
 
-# Redireciona o banco para um arquivo temporário ANTES de importar o app
-# (app.py chama init_db() no import).
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
-
 from app import app  # noqa: E402
 
 
 @pytest.fixture()
 def dados():
     """Banco limpo com loja A e loja B e dados básicos da loja A."""
-    # Reafirma o redirecionamento: outro módulo de teste pode ter trocado
-    # database.DB_PATH durante a coleta.
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
     conn = database.get_conn()
     cur = conn.cursor()
     for codigo in ("loja_a", "loja_b"):
         cur.execute(
-            "INSERT INTO lojas (codigo, nome, status) VALUES (?, ?, 'aprovado')",
+            "INSERT INTO lojas (codigo, nome, status) VALUES (%s, %s, 'aprovado')",
             (codigo, codigo),
         )
         # Cada loja precisa de um usuário: a sessão agora carrega usuario_id
         # e require_login revalida o usuário a cada request.
         cur.execute(
-            "INSERT INTO usuarios (loja, nome, login, senha_hash, papel) VALUES (?, 'Dono', 'dono', 'x', 'admin')",
+            "INSERT INTO usuarios (loja, nome, login, senha_hash, papel) VALUES (%s, 'Dono', 'dono', 'x', 'admin')",
             (codigo,),
         )
-    cur.execute("INSERT INTO estoque_tecidos (nome_tecido, loja) VALUES ('Malha', 'loja_a')")
-    tecido_a = cur.lastrowid
+    cur.execute("INSERT INTO estoque_tecidos (nome_tecido, loja) VALUES ('Malha', 'loja_a') RETURNING id")
+    tecido_a = cur.fetchone()["id"]
     cur.execute(
-        "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (?, 'Azul', 10, 5)",
+        "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (%s, 'Azul', 10, 5) RETURNING id",
         (tecido_a,),
     )
-    cor_a = cur.lastrowid
-    cur.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente A', 'loja_a')")
-    cliente_a = cur.lastrowid
-    cur.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente B', 'loja_b')")
-    cliente_b = cur.lastrowid
+    cor_a = cur.fetchone()["id"]
+    cur.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente A', 'loja_a') RETURNING id")
+    cliente_a = cur.fetchone()["id"]
+    cur.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente B', 'loja_b') RETURNING id")
+    cliente_b = cur.fetchone()["id"]
     conn.commit()
     conn.close()
     yield {
@@ -67,13 +56,12 @@ def dados():
         "cliente_a": cliente_a,
         "cliente_b": cliente_b,
     }
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _client(loja):
     conn = database.get_conn()
     usuario = conn.execute(
-        "SELECT id, papel FROM usuarios WHERE loja = ? LIMIT 1", (loja,)
+        "SELECT id, papel FROM usuarios WHERE loja = %s LIMIT 1", (loja,)
     ).fetchone()
     conn.close()
     c = app.test_client()
@@ -86,7 +74,7 @@ def _client(loja):
 
 def _cor_existe(cor_id):
     conn = database.get_conn()
-    row = conn.execute("SELECT peso_kg FROM estoque_cores WHERE id = ?", (cor_id,)).fetchone()
+    row = conn.execute("SELECT peso_kg FROM estoque_cores WHERE id = %s", (cor_id,)).fetchone()
     conn.close()
     return row
 
@@ -157,7 +145,7 @@ def test_pedido_grava_usuario_logado_como_vendedor(dados):
     assert resp.status_code == 201
     conn = database.get_conn()
     row = conn.execute(
-        "SELECT p.usuario_id, u.loja FROM pedidos p JOIN usuarios u ON u.id = p.usuario_id WHERE p.id = ?",
+        "SELECT p.usuario_id, u.loja FROM pedidos p JOIN usuarios u ON u.id = p.usuario_id WHERE p.id = %s",
         (resp.get_json()["id"],),
     ).fetchone()
     conn.close()
@@ -207,8 +195,8 @@ def test_put_pedido_com_cliente_de_outra_loja(dados):
 def _contar_itens(pedido_id):
     conn = database.get_conn()
     n = conn.execute(
-        "SELECT COUNT(*) FROM itens_pedido WHERE pedido_id = ?", (pedido_id,)
-    ).fetchone()[0]
+        "SELECT COUNT(*) AS n FROM itens_pedido WHERE pedido_id = %s", (pedido_id,)
+    ).fetchone()["n"]
     conn.close()
     return n
 
@@ -246,9 +234,9 @@ def test_loja_b_nao_edita_pedido_da_loja_a(dados):
     assert _contar_itens(pedido_id) == 2
     conn = database.get_conn()
     cores = [
-        r[0]
+        r["cor"]
         for r in conn.execute(
-            "SELECT cor FROM itens_pedido WHERE pedido_id = ? ORDER BY id", (pedido_id,)
+            "SELECT cor FROM itens_pedido WHERE pedido_id = %s ORDER BY id", (pedido_id,)
         ).fetchall()
     ]
     conn.close()

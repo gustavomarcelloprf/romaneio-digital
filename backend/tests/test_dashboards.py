@@ -2,7 +2,6 @@
 # com filtro de período, ranking de tecidos/operadores e isolamento por loja.
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -15,10 +14,6 @@ import database
 # app.py exige SECRET_KEY e ADMIN_TOKEN no import (boot fail-fast).
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
-
-# Redireciona o banco para um arquivo temporário ANTES de importar o app.
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
 
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
@@ -42,9 +37,9 @@ def _signup_loja_aprovada(codigo):
     )
     assert resp.status_code == 201
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", (codigo,))
-    cur = conn.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente X', ?)", (codigo,))
-    cliente_id = cur.lastrowid
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", (codigo,))
+    cur = conn.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente X', %s) RETURNING id", (codigo,))
+    cliente_id = cur.fetchone()["id"]
     conn.commit()
     conn.close()
     resp = c.post("/auth/login", json={"nome_loja": codigo, "login": "admin", "senha": SENHA})
@@ -67,7 +62,7 @@ def _post_pedido(c, cliente_id, tecido, peso, preco, data_iso):
     # A data do pedido é sempre "agora" no POST; fixamos aqui para o teste
     # ser hermético e independente do relógio.
     conn = database.get_conn()
-    conn.execute("UPDATE pedidos SET data_iso=? WHERE id=?", (data_iso, pedido_id))
+    conn.execute("UPDATE pedidos SET data_iso=%s WHERE id=%s", (data_iso, pedido_id))
     conn.commit()
     conn.close()
     return pedido_id
@@ -86,10 +81,6 @@ def ctx():
       - operador: Malha  5,0 kg × 10,00 = 50,00 em 2025-12-20.
     Estoque: "Malha" (vendeu) e "Tecido Parado" (encalhado).
     """
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
-
     admin, cliente_id = _signup_loja_aprovada(LOJA)
 
     resp = admin.post(
@@ -115,7 +106,7 @@ def ctx():
 
     conn = database.get_conn()
     admin_id = conn.execute(
-        "SELECT id FROM usuarios WHERE loja=? AND login='admin'", (LOJA,)
+        "SELECT id FROM usuarios WHERE loja=%s AND login='admin'", (LOJA,)
     ).fetchone()["id"]
     conn.close()
 
@@ -127,7 +118,6 @@ def ctx():
         "operador_id": operador_id,
         "fora_id": fora_id,
     }
-    _TMP_DB.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

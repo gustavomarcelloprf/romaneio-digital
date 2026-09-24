@@ -3,7 +3,6 @@
 # encomenda como 'recebida' e devolve a variação previsto x recebido.
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -16,9 +15,6 @@ import database
 
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
-
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
 
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
@@ -39,10 +35,6 @@ def _login(login):
 @pytest.fixture()
 def ctx():
     """Loja aprovada com admin, gerente e operador; tecido Malha com Azul = 10 kg."""
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
-
     c = app.test_client()
     assert c.post(
         "/auth/signup",
@@ -50,17 +42,17 @@ def ctx():
     ).status_code == 201
 
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", (LOJA,))
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", (LOJA,))
     for login, papel in (("gerente", "gerente"), ("operador", "operador")):
         conn.execute(
-            "INSERT INTO usuarios (loja, nome, login, senha_hash, papel) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO usuarios (loja, nome, login, senha_hash, papel) VALUES (%s, %s, %s, %s, %s)",
             (LOJA, login.title(), login, generate_password_hash(SENHA), papel),
         )
     tecido_id = conn.execute(
-        "INSERT INTO estoque_tecidos (nome_tecido, loja) VALUES ('Malha', ?)", (LOJA,)
-    ).lastrowid
+        "INSERT INTO estoque_tecidos (nome_tecido, loja) VALUES ('Malha', %s) RETURNING id", (LOJA,)
+    ).fetchone()["id"]
     conn.execute(
-        "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (?, 'Azul', 10, 3)",
+        "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (%s, 'Azul', 10, 3)",
         (tecido_id,),
     )
     conn.commit()
@@ -72,7 +64,6 @@ def ctx():
         "op": _login("operador"),
         "tecido_id": tecido_id,
     }
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _cor(nome, tecido="Malha"):
@@ -80,7 +71,7 @@ def _cor(nome, tecido="Malha"):
     row = conn.execute(
         "SELECT c.peso_kg, c.qtd_pecas FROM estoque_cores c "
         "JOIN estoque_tecidos t ON t.id = c.tecido_id "
-        "WHERE t.loja = ? AND t.nome_tecido = ? AND c.nome_cor = ?",
+        "WHERE t.loja = %s AND t.nome_tecido = %s AND c.nome_cor = %s",
         (LOJA, tecido, nome),
     ).fetchone()
     conn.close()
@@ -342,8 +333,8 @@ def test_encomenda_isolada_por_loja(ctx):
     conn = database.get_conn()
     conn.execute("INSERT INTO lojas (codigo, nome, status) VALUES ('Outra', 'Outra', 'aprovado')")
     outro_id = conn.execute(
-        "INSERT INTO encomendas (loja, fornecedor, status) VALUES ('Outra', 'Fornecedor Y', 'aberta')"
-    ).lastrowid
+        "INSERT INTO encomendas (loja, fornecedor, status) VALUES ('Outra', 'Fornecedor Y', 'aberta') RETURNING id"
+    ).fetchone()["id"]
     conn.commit()
     conn.close()
     assert ctx["admin"].get(f"/api/encomendas/{outro_id}").status_code == 404

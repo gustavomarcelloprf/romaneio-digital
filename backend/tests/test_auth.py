@@ -1,7 +1,6 @@
 import os
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -13,7 +12,11 @@ TEST_ADMIN_TOKEN = "token-admin-de-teste"
 
 
 def _importar_app(env_overrides, codigo="import app"):
-    """Importa o app em um subprocesso com ambiente controlado."""
+    """Importa o app em um subprocesso com ambiente controlado.
+
+    DATABASE_URL (o Postgres de teste, apontado pelo conftest) é herdada:
+    o import do app chama init_db() e precisa de um banco.
+    """
     env = {
         k: v
         for k, v in os.environ.items()
@@ -81,19 +84,13 @@ def client():
     os.environ["SECRET_KEY"] = TEST_SECRET
     os.environ["ADMIN_TOKEN"] = TEST_ADMIN_TOKEN
     sys.path.insert(0, str(BACKEND_DIR))
-    import database
 
-    # Banco temporário próprio: o DB_PATH ativo pode ser o de outro módulo
-    # de teste (o último a ser coletado), possivelmente sem schema criado.
-    tmp_db = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-    database.DB_PATH = str(tmp_db)
-    database.init_db()
-
+    # O banco de teste (TEST_DATABASE_URL) já foi apontado pelo conftest e é
+    # recriado antes de cada teste pela fixture autouse.
     import app as app_module
 
     app_module.app.config.update(TESTING=True)
     yield app_module.app.test_client()
-    tmp_db.unlink(missing_ok=True)
 
 
 def test_admin_sem_header_retorna_403(client):

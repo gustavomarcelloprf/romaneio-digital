@@ -2,7 +2,6 @@
 # admin-only, vendedor = usuário logado e comissão congelada no pedido.
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -15,10 +14,6 @@ import database
 # app.py exige SECRET_KEY e ADMIN_TOKEN no import (boot fail-fast).
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
-
-# Redireciona o banco para um arquivo temporário ANTES de importar o app.
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
 
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
@@ -33,10 +28,6 @@ SENHA = "s3nh4-forte"
 @pytest.fixture()
 def ctx():
     """Banco limpo com loja aprovada, admin logado e um cliente."""
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
-
     c = app.test_client()
     resp = c.post(
         "/auth/signup",
@@ -45,11 +36,11 @@ def ctx():
     assert resp.status_code == 201
 
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", (LOJA,))
-    cur = conn.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente X', ?)", (LOJA,))
-    cliente_id = cur.lastrowid
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", (LOJA,))
+    cur = conn.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente X', %s) RETURNING id", (LOJA,))
+    cliente_id = cur.fetchone()["id"]
     admin_id = conn.execute(
-        "SELECT id FROM usuarios WHERE loja=? AND login='admin'", (LOJA,)
+        "SELECT id FROM usuarios WHERE loja=%s AND login='admin'", (LOJA,)
     ).fetchone()["id"]
     conn.commit()
     conn.close()
@@ -58,7 +49,6 @@ def ctx():
     assert resp.status_code == 200
 
     yield {"admin": c, "cliente_id": cliente_id, "admin_id": admin_id}
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _criar_operador(admin_client, login="operador", taxa="5"):
@@ -95,7 +85,7 @@ def _post_pedido(c, cliente_id, peso="1,0", preco="10,00"):
 def _pedido_db(pedido_id):
     conn = database.get_conn()
     row = conn.execute(
-        "SELECT usuario_id, total, comissao_taxa, comissao_valor FROM pedidos WHERE id=?",
+        "SELECT usuario_id, total, comissao_taxa, comissao_valor FROM pedidos WHERE id=%s",
         (pedido_id,),
     ).fetchone()
     conn.close()
@@ -105,7 +95,7 @@ def _pedido_db(pedido_id):
 def _set_taxa(usuario_login, taxa):
     conn = database.get_conn()
     conn.execute(
-        "UPDATE usuarios SET taxa_comissao=? WHERE loja=? AND login=?",
+        "UPDATE usuarios SET taxa_comissao=%s WHERE loja=%s AND login=%s",
         (taxa, LOJA, usuario_login),
     )
     conn.commit()
@@ -181,7 +171,7 @@ def test_pedido_grava_usuario_e_comissao_congelada(ctx):
 
     conn = database.get_conn()
     op_id = conn.execute(
-        "SELECT id FROM usuarios WHERE loja=? AND login='operador'", (LOJA,)
+        "SELECT id FROM usuarios WHERE loja=%s AND login='operador'", (LOJA,)
     ).fetchone()["id"]
     conn.close()
 

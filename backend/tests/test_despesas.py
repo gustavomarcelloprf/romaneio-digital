@@ -3,7 +3,6 @@
 import io
 import os
 import sys
-import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -19,9 +18,6 @@ import database
 # app.py exige SECRET_KEY e ADMIN_TOKEN no import (boot fail-fast).
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
-
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
 
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
@@ -49,7 +45,7 @@ def _signup_loja_aprovada(codigo):
     )
     assert resp.status_code == 201
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", (codigo,))
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", (codigo,))
     conn.commit()
     conn.close()
     return _login(codigo, "admin")
@@ -78,10 +74,6 @@ def _importar(client, arquivo):
 def ctx():
     """Loja aprovada com admin, operador e gerente, e um pedido de R$ 100,00
     em 2026-01-10 (faturamento do período = 100,00)."""
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
-
     admin = _signup_loja_aprovada(LOJA)
     resp = admin.post(
         "/usuarios",
@@ -95,12 +87,12 @@ def ctx():
     # Não há UI para criar gerente: o papel nasce direto no banco.
     conn.execute(
         "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao) "
-        "VALUES (?, 'Gerente', 'gerente', ?, 'gerente', 0)",
+        "VALUES (%s, 'Gerente', 'gerente', %s, 'gerente', 0)",
         (LOJA, generate_password_hash(SENHA)),
     )
     cliente_id = conn.execute(
-        "INSERT INTO clientes (nome, loja) VALUES ('Cliente', ?)", (LOJA,)
-    ).lastrowid
+        "INSERT INTO clientes (nome, loja) VALUES ('Cliente', %s) RETURNING id", (LOJA,)
+    ).fetchone()["id"]
     conn.commit()
     conn.close()
 
@@ -111,7 +103,7 @@ def ctx():
     )
     assert resp.status_code == 201
     conn = database.get_conn()
-    conn.execute("UPDATE pedidos SET data_iso='2026-01-10 10:00' WHERE id=?", (resp.get_json()["id"],))
+    conn.execute("UPDATE pedidos SET data_iso='2026-01-10 10:00' WHERE id=%s", (resp.get_json()["id"],))
     conn.commit()
     conn.close()
 
@@ -120,13 +112,12 @@ def ctx():
         "op": _login(LOJA, "operador"),
         "gerente": _login(LOJA, "gerente"),
     }
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _despesas_no_banco(loja=LOJA):
     conn = database.get_conn()
     rows = [dict(r) for r in conn.execute(
-        "SELECT data, descricao, categoria, valor FROM despesas WHERE loja=? ORDER BY id", (loja,)
+        "SELECT data, descricao, categoria, valor FROM despesas WHERE loja=%s ORDER BY id", (loja,)
     ).fetchall()]
     conn.close()
     return rows
