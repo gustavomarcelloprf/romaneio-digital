@@ -2,7 +2,6 @@
 # abatem esse saldo, e as rotas de gestão exigem fiado_gerir (gerente/admin).
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -16,9 +15,6 @@ import database
 # app.py exige SECRET_KEY e ADMIN_TOKEN no import (boot fail-fast).
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
-
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
 
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
@@ -39,10 +35,6 @@ def _login(login):
 @pytest.fixture()
 def ctx():
     """Loja aprovada com admin, operador e gerente, e dois clientes."""
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
-
     admin = app.test_client()
     resp = admin.post(
         "/auth/signup",
@@ -51,19 +43,23 @@ def ctx():
     assert resp.status_code == 201
 
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", (LOJA,))
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", (LOJA,))
     conn.execute(
         "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao) "
-        "VALUES (?, 'Gerente Um', 'gerente', ?, 'gerente', 0)",
+        "VALUES (%s, 'Gerente Um', 'gerente', %s, 'gerente', 0)",
         (LOJA, generate_password_hash(SENHA)),
     )
     conn.execute(
         "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao) "
-        "VALUES (?, 'Operador Um', 'operador', ?, 'operador', 0)",
+        "VALUES (%s, 'Operador Um', 'operador', %s, 'operador', 0)",
         (LOJA, generate_password_hash(SENHA)),
     )
-    cliente_a = conn.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente A', ?)", (LOJA,)).lastrowid
-    cliente_b = conn.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente B', ?)", (LOJA,)).lastrowid
+    cliente_a = conn.execute(
+        "INSERT INTO clientes (nome, loja) VALUES ('Cliente A', %s) RETURNING id", (LOJA,)
+    ).fetchone()["id"]
+    cliente_b = conn.execute(
+        "INSERT INTO clientes (nome, loja) VALUES ('Cliente B', %s) RETURNING id", (LOJA,)
+    ).fetchone()["id"]
     conn.commit()
     conn.close()
 
@@ -76,7 +72,6 @@ def ctx():
         "cliente_a": cliente_a,
         "cliente_b": cliente_b,
     }
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _post_pedido(c, cliente_id, peso="10", preco="10,00", pago=None):
@@ -108,7 +103,7 @@ def test_pedido_padrao_e_pago_nao_abre_saldo(ctx):
     resp = _post_pedido(ctx["admin"], ctx["cliente_a"])
     assert resp.status_code == 201
     conn = database.get_conn()
-    pago = conn.execute("SELECT pago FROM pedidos WHERE id=?", (resp.get_json()["id"],)).fetchone()["pago"]
+    pago = conn.execute("SELECT pago FROM pedidos WHERE id=%s", (resp.get_json()["id"],)).fetchone()["pago"]
     conn.close()
     assert pago == 1
     assert _saldo(ctx["admin"], ctx["cliente_a"]) == 0
@@ -166,7 +161,7 @@ def test_pagamento_rejeita_cliente_de_outra_loja(ctx):
     )
     assert resp.status_code == 201
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", ("Loja Fiado B",))
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", ("Loja Fiado B",))
     conn.commit()
     conn.close()
     admin_b = app.test_client()

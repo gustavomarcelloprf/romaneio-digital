@@ -1,9 +1,7 @@
 # Testes do ORÇAMENTO que vira pedido (status em pedidos + POST
 # /pedidos/<id>/converter) e do ALERTA de estoque mínimo por cor.
 import os
-import sqlite3
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -17,10 +15,6 @@ import database
 # app.py exige SECRET_KEY e ADMIN_TOKEN no import (boot fail-fast).
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
-
-# Redireciona o banco para um arquivo temporário ANTES de importar o app.
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
 
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
@@ -47,10 +41,6 @@ def ctx():
     Uma segunda loja aprovada (com sua própria Malha/Azul) serve para os
     testes de isolamento.
     """
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
-
     c = app.test_client()
     for loja in (LOJA, OUTRA):
         assert c.post(
@@ -61,25 +51,25 @@ def ctx():
     conn = database.get_conn()
     conn.execute("UPDATE lojas SET status='aprovado'")
     cliente_id = conn.execute(
-        "INSERT INTO clientes (nome, loja) VALUES ('Cliente X', ?)", (LOJA,)
-    ).lastrowid
+        "INSERT INTO clientes (nome, loja) VALUES ('Cliente X', %s) RETURNING id", (LOJA,)
+    ).fetchone()["id"]
     conn.execute(
-        "INSERT INTO usuarios (loja, nome, login, senha_hash, papel) VALUES (?, 'Gerente', 'gerente', ?, 'gerente')",
+        "INSERT INTO usuarios (loja, nome, login, senha_hash, papel) VALUES (%s, 'Gerente', 'gerente', %s, 'gerente')",
         (LOJA, generate_password_hash(SENHA)),
     )
     op_id = conn.execute(
-        "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao) VALUES (?, 'Operador', 'operador', ?, 'operador', 10)",
+        "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao) VALUES (%s, 'Operador', 'operador', %s, 'operador', 10) RETURNING id",
         (LOJA, generate_password_hash(SENHA)),
-    ).lastrowid
+    ).fetchone()["id"]
     cor_ids = {}
     for loja in (LOJA, OUTRA):
         tecido_id = conn.execute(
-            "INSERT INTO estoque_tecidos (nome_tecido, loja) VALUES ('Malha', ?)", (loja,)
-        ).lastrowid
+            "INSERT INTO estoque_tecidos (nome_tecido, loja) VALUES ('Malha', %s) RETURNING id", (loja,)
+        ).fetchone()["id"]
         cor_ids[loja] = conn.execute(
-            "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (?, 'Azul', 10, 3)",
+            "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (%s, 'Azul', 10, 3) RETURNING id",
             (tecido_id,),
-        ).lastrowid
+        ).fetchone()["id"]
     conn.commit()
     conn.close()
 
@@ -94,14 +84,13 @@ def ctx():
         "cor_id": cor_ids[LOJA],
         "cor_id_outra": cor_ids[OUTRA],
     }
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _peso_azul(loja=LOJA):
     conn = database.get_conn()
     row = conn.execute(
         "SELECT c.peso_kg FROM estoque_cores c JOIN estoque_tecidos t ON t.id = c.tecido_id "
-        "WHERE t.loja = ? AND t.nome_tecido = 'Malha' AND c.nome_cor = 'Azul'",
+        "WHERE t.loja = %s AND t.nome_tecido = 'Malha' AND c.nome_cor = 'Azul'",
         (loja,),
     ).fetchone()
     conn.close()
@@ -111,7 +100,7 @@ def _peso_azul(loja=LOJA):
 def _pedido_db(pedido_id):
     conn = database.get_conn()
     row = conn.execute(
-        "SELECT status, comissao_taxa, comissao_valor, total, descontar_estoque FROM pedidos WHERE id = ?",
+        "SELECT status, comissao_taxa, comissao_valor, total, descontar_estoque FROM pedidos WHERE id = %s",
         (pedido_id,),
     ).fetchone()
     conn.close()
@@ -307,7 +296,7 @@ def test_converter_venda_casada_com_tecido_nao_cadastrado(ctx):
     pid = _orcamento(ctx, cliente="op", descontar_estoque=False)
     # Corrige o tecido do orçamento para um que não existe no estoque.
     conn = database.get_conn()
-    conn.execute("UPDATE pedidos SET tecido = 'Tecido Nao Rastreado' WHERE id = ?", (pid,))
+    conn.execute("UPDATE pedidos SET tecido = 'Tecido Nao Rastreado' WHERE id = %s", (pid,))
     conn.commit()
     conn.close()
 
@@ -415,17 +404,23 @@ def test_definir_minimo_permissoes_e_validacao(ctx):
 # ---------------------------------------------------------------------------
 # D) Migração de banco antigo
 # ---------------------------------------------------------------------------
-def test_init_db_migra_banco_sem_as_colunas_novas(tmp_path, monkeypatch):
-    db = tmp_path / "antigo.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE pedidos (id INTEGER PRIMARY KEY, loja TEXT, total REAL)")
+def test_init_db_migra_banco_sem_as_colunas_novas(banco_sem_schema):
+    # Schema "antigo" montado à mão: pedidos e estoque_cores sem as colunas
+    # novas, já com linhas. init_db() precisa acrescentá-las preenchidas.
+    conn = database.get_conn()
+    conn.execute(
+        "CREATE TABLE pedidos (id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
+        "loja TEXT, total DOUBLE PRECISION)"
+    )
     conn.execute("INSERT INTO pedidos (loja, total) VALUES ('X', 10)")
-    conn.execute("CREATE TABLE estoque_cores (id INTEGER PRIMARY KEY, tecido_id INTEGER, nome_cor TEXT, peso_kg REAL)")
+    conn.execute(
+        "CREATE TABLE estoque_cores (id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
+        "tecido_id INTEGER, nome_cor TEXT, peso_kg DOUBLE PRECISION)"
+    )
     conn.execute("INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg) VALUES (1, 'Azul', 3)")
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(database, "DB_PATH", str(db))
     database.init_db()
 
     conn = database.get_conn()

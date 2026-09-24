@@ -3,7 +3,6 @@
 # despesa avulsa e bloqueio para operador/gerente.
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -17,9 +16,6 @@ import database
 # app.py exige SECRET_KEY e ADMIN_TOKEN no import (boot fail-fast).
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
-
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
 
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
@@ -47,7 +43,7 @@ def _signup_loja_aprovada(codigo):
     )
     assert resp.status_code == 201
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", (codigo,))
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", (codigo,))
     conn.commit()
     conn.close()
     return _login(codigo, "admin")
@@ -62,7 +58,7 @@ def _pedido(client, cliente_id, data_iso):
     )
     assert resp.status_code == 201
     conn = database.get_conn()
-    conn.execute("UPDATE pedidos SET data_iso=? WHERE id=?", (data_iso, resp.get_json()["id"]))
+    conn.execute("UPDATE pedidos SET data_iso=%s WHERE id=%s", (data_iso, resp.get_json()["id"]))
     conn.commit()
     conn.close()
 
@@ -72,24 +68,21 @@ def ctx():
     """Loja com admin, operador (10% de comissão) e gerente. No período há
     um pedido do admin e um do operador, R$ 100,00 cada: faturamento 200,00
     e comissões a pagar 10,00 (o admin não recebe comissão)."""
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
-
     admin = _signup_loja_aprovada(LOJA)
     conn = database.get_conn()
     # Operador e gerente nascem direto no banco, já com senha, para logar.
-    conn.executemany(
-        "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao, ativo) "
-        "VALUES (?, ?, ?, ?, ?, ?, 1)",
-        [
-            (LOJA, "Operador", "operador", generate_password_hash(SENHA), "operador", 10),
-            (LOJA, "Gerente", "gerente", generate_password_hash(SENHA), "gerente", 0),
-        ],
-    )
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao, ativo) "
+            "VALUES (%s, %s, %s, %s, %s, %s, 1)",
+            [
+                (LOJA, "Operador", "operador", generate_password_hash(SENHA), "operador", 10),
+                (LOJA, "Gerente", "gerente", generate_password_hash(SENHA), "gerente", 0),
+            ],
+        )
     cliente_id = conn.execute(
-        "INSERT INTO clientes (nome, loja) VALUES ('Cliente', ?)", (LOJA,)
-    ).lastrowid
+        "INSERT INTO clientes (nome, loja) VALUES ('Cliente', %s) RETURNING id", (LOJA,)
+    ).fetchone()["id"]
     conn.commit()
     conn.close()
 
@@ -98,13 +91,12 @@ def ctx():
     _pedido(op, cliente_id, "2026-01-11 10:00")
 
     yield {"admin": admin, "op": op, "gerente": _login(LOJA, "gerente")}
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _despesas_no_banco(loja=LOJA):
     conn = database.get_conn()
     rows = [dict(r) for r in conn.execute(
-        "SELECT data, descricao, categoria, valor, recorrente_id FROM despesas WHERE loja=? ORDER BY id",
+        "SELECT data, descricao, categoria, valor, recorrente_id FROM despesas WHERE loja=%s ORDER BY id",
         (loja,),
     ).fetchall()]
     conn.close()

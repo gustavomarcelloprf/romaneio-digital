@@ -9,7 +9,7 @@ import functools
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-import sqlite3
+import psycopg
 import sys
 sys.path.append(str(Path(__file__).resolve().parent))
 
@@ -53,6 +53,10 @@ limiter = Limiter(get_remote_address, app=app, storage_uri="memory://")
 
 if not os.environ.get("ADMIN_TOKEN"):
     raise RuntimeError("ADMIN_TOKEN não configurado.")
+# Postgres-only: sem DATABASE_URL não há banco. Mesma regra fail-fast de
+# SECRET_KEY/ADMIN_TOKEN — o app não sobe pela metade.
+if not os.environ.get("DATABASE_URL"):
+    raise RuntimeError("DATABASE_URL não configurada.")
 
 init_db()
 
@@ -127,7 +131,7 @@ def _baixar_estoque(conn, loja, tecido_nome, itens):
     linhas da mesma cor somam antes de validar. qtd_pecas é só informativo e
     não é decrementado. Levanta EstoqueInsuficiente (-> 409) se não cobrir.
     """
-    tecido_row = conn.execute("SELECT id FROM estoque_tecidos WHERE nome_tecido = ? AND loja = ?", (tecido_nome, loja)).fetchone()
+    tecido_row = conn.execute("SELECT id FROM estoque_tecidos WHERE nome_tecido = %s AND loja = %s", (tecido_nome, loja)).fetchone()
     if not tecido_row:
         raise EstoqueInsuficiente(f"Tipo de tecido '{tecido_nome}' não encontrado no estoque.")
     tecido_id = tecido_row['id']
@@ -140,7 +144,9 @@ def _baixar_estoque(conn, loja, tecido_nome, itens):
         peso_por_cor[cor_nome] = peso_por_cor.get(cor_nome, 0) + peso_pedido
 
     for cor_nome, peso_pedido in peso_por_cor.items():
-        cor_row = conn.execute("SELECT id, peso_kg FROM estoque_cores WHERE tecido_id = ? AND nome_cor = ?", (tecido_id, cor_nome)).fetchone()
+        # FOR UPDATE: trava a linha da cor até o commit, para duas vendas
+        # simultâneas não venderem juntas mais do que o disponível.
+        cor_row = conn.execute("SELECT id, peso_kg FROM estoque_cores WHERE tecido_id = %s AND nome_cor = %s FOR UPDATE", (tecido_id, cor_nome)).fetchone()
         if not cor_row:
             raise EstoqueInsuficiente(f"Cor '{cor_nome}' não encontrada no estoque de '{tecido_nome}'.")
         if cor_row['peso_kg'] + 1e-9 < peso_pedido:
@@ -149,7 +155,8 @@ def _baixar_estoque(conn, loja, tecido_nome, itens):
                 f"pedido {round(peso_pedido, 3)} kg, disponível {round(cor_row['peso_kg'], 3)} kg."
             )
         # ROUND evita resíduo de ponto flutuante (ex.: 0,30000000004 kg).
-        conn.execute("UPDATE estoque_cores SET peso_kg = ROUND(peso_kg - ?, 3) WHERE id = ?", (peso_pedido, cor_row['id']))
+        # No Postgres ROUND com casas só existe para numeric, daí o cast.
+        conn.execute("UPDATE estoque_cores SET peso_kg = ROUND((peso_kg - %s)::numeric, 3) WHERE id = %s", (peso_pedido, cor_row['id']))
 
 def _taxa_comissao(usuario):
     """Taxa vigente do vendedor. O admin é o dono e não tira comissão de si mesmo."""
@@ -225,16 +232,15 @@ def auth_signup():
     try:
         # Loja (tenant, pendente de aprovação) e primeiro usuário admin
         # nascem juntos, na mesma transação.
-        conn.execute("BEGIN")
-        conn.execute("INSERT INTO lojas (codigo, nome) VALUES (?, ?)", (nome_loja, nome_loja))
+        conn.execute("INSERT INTO lojas (codigo, nome) VALUES (%s, %s)", (nome_loja, nome_loja))
         conn.execute(
-            "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao, ativo) VALUES (?, ?, ?, ?, 'admin', 0, 1)",
+            "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao, ativo) VALUES (%s, %s, %s, %s, 'admin', 0, 1)",
             (nome_loja, nome, login, senha_hash),
         )
         conn.commit()
-    except sqlite3.IntegrityError as e:
+    except psycopg.IntegrityError as e:
         conn.rollback()
-        if "usuarios" in str(e):
+        if e.diag.table_name == "usuarios":
             return jsonify(error="Já existe um usuário com este login nesta loja."), 409
         return jsonify(error="Já existe uma loja com este nome."), 409
     finally:
@@ -304,7 +310,7 @@ def _usuario_do_convite(conn, token):
         return None
     return conn.execute(
         "SELECT id, loja, nome, login FROM usuarios "
-        "WHERE convite_token = ? AND convite_expira > ? AND ativo = 1",
+        "WHERE convite_token = %s AND convite_expira > %s AND ativo = 1",
         (token, _agora_utc_str()),
     ).fetchone()
 
@@ -338,8 +344,8 @@ def convite_definir_senha(token):
             return jsonify(error=f"A senha precisa ter pelo menos {CONVITE_SENHA_MIN} caracteres."), 400
         # O WHERE repete o token: se dois envios correrem juntos, só um grava.
         cur = conn.execute(
-            "UPDATE usuarios SET senha_hash = ?, convite_token = NULL, convite_expira = NULL "
-            "WHERE id = ? AND convite_token = ?",
+            "UPDATE usuarios SET senha_hash = %s, convite_token = NULL, convite_expira = NULL "
+            "WHERE id = %s AND convite_token = %s",
             (generate_password_hash(senha), usuario["id"], token),
         )
         if cur.rowcount != 1:
@@ -372,7 +378,7 @@ def clientes_api():
     conn = get_conn()
     if request.method == "GET":
         search_query = request.args.get("search", "").strip()
-        sql = "SELECT id, nome, telefone, email FROM clientes WHERE loja = ? AND nome LIKE ? ORDER BY nome ASC"
+        sql = "SELECT id, nome, telefone, email FROM clientes WHERE loja = %s AND nome LIKE %s ORDER BY nome ASC"
         clientes = [dict(r) for r in conn.execute(sql, (loja, f"%{search_query}%")).fetchall()]
         conn.close()
         return jsonify(clientes)
@@ -382,11 +388,11 @@ def clientes_api():
         if not nome:
             conn.close(); return jsonify(error="Nome é obrigatório."), 400
         try:
-            cur = conn.execute("INSERT INTO clientes (nome, telefone, email, loja) VALUES (?, ?, ?, ?)", (nome, data.get("telefone"), data.get("email"), loja))
-            new_id = cur.lastrowid
+            cur = conn.execute("INSERT INTO clientes (nome, telefone, email, loja) VALUES (%s, %s, %s, %s) RETURNING id", (nome, data.get("telefone"), data.get("email"), loja))
+            new_id = cur.fetchone()["id"]
             conn.commit()
             return jsonify(id=new_id, **data), 201
-        except sqlite3.Error as e:
+        except psycopg.Error as e:
             conn.rollback(); return jsonify(error=f"Erro no banco de dados: {e}"), 500
         finally: conn.close()
 
@@ -396,12 +402,12 @@ def cliente_delete_api(cliente_id: int):
     loja = current_loja()
     conn = get_conn()
     try:
-        cur = conn.execute("DELETE FROM clientes WHERE id = ? AND loja = ?", (cliente_id, loja))
+        cur = conn.execute("DELETE FROM clientes WHERE id = %s AND loja = %s", (cliente_id, loja))
         if cur.rowcount == 0:
             conn.close(); return jsonify(error="Cliente não encontrado."), 404
         conn.commit()
         return jsonify(ok=True, message="Cliente removido com sucesso.")
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally: conn.close()
 
@@ -415,14 +421,14 @@ def cliente_update_api(cliente_id: int):
 
     conn = get_conn()
     try:
-        cur = conn.execute("UPDATE clientes SET telefone = ?, email = ? WHERE id = ? AND loja = ?",
+        cur = conn.execute("UPDATE clientes SET telefone = %s, email = %s WHERE id = %s AND loja = %s",
                            (telefone, email, cliente_id, loja))
         if cur.rowcount == 0:
             conn.close(); return jsonify(error="Cliente não encontrado."), 404
         
         conn.commit()
         return jsonify(ok=True, message="Cliente atualizado com sucesso.")
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
         conn.close()
@@ -432,11 +438,11 @@ def cliente_update_api(cliente_id: int):
 # -----------------------------------------------------------------------------
 def _saldo_cliente(conn, loja, cliente_id):
     total_fiado = conn.execute(
-        "SELECT COALESCE(SUM(total), 0) AS t FROM pedidos WHERE cliente_id = ? AND loja = ? AND pago = 0",
+        "SELECT COALESCE(SUM(total), 0) AS t FROM pedidos WHERE cliente_id = %s AND loja = %s AND pago = 0",
         (cliente_id, loja),
     ).fetchone()["t"]
     total_pago = conn.execute(
-        "SELECT COALESCE(SUM(valor), 0) AS t FROM pagamentos WHERE cliente_id = ? AND loja = ?",
+        "SELECT COALESCE(SUM(valor), 0) AS t FROM pagamentos WHERE cliente_id = %s AND loja = %s",
         (cliente_id, loja),
     ).fetchone()["t"]
     return round(total_fiado - total_pago, 2)
@@ -457,17 +463,18 @@ def cliente_pagamento_criar(cliente_id: int):
 
     conn = get_conn()
     try:
-        if not conn.execute("SELECT 1 FROM clientes WHERE id = ? AND loja = ?", (cliente_id, loja)).fetchone():
+        if not conn.execute("SELECT 1 FROM clientes WHERE id = %s AND loja = %s", (cliente_id, loja)).fetchone():
             return jsonify(error="Cliente inválido para esta loja."), 404
         cur = conn.execute(
-            "INSERT INTO pagamentos (loja, cliente_id, valor, data) VALUES (?, ?, ?, ?)",
+            "INSERT INTO pagamentos (loja, cliente_id, valor, data) VALUES (%s, %s, %s, %s) RETURNING id",
             (loja, cliente_id, valor, data_pagamento),
         )
+        pagamento_id = cur.fetchone()["id"]
         conn.commit()
         saldo = _saldo_cliente(conn, loja, cliente_id)
-        return jsonify(id=cur.lastrowid, cliente_id=cliente_id, valor=round(valor, 2),
+        return jsonify(id=pagamento_id, cliente_id=cliente_id, valor=round(valor, 2),
                         data=data_pagamento, saldo=saldo), 201
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
         conn.close()
@@ -480,7 +487,7 @@ def cliente_saldo_api(cliente_id: int):
     loja = current_loja()
     conn = get_conn()
     try:
-        if not conn.execute("SELECT 1 FROM clientes WHERE id = ? AND loja = ?", (cliente_id, loja)).fetchone():
+        if not conn.execute("SELECT 1 FROM clientes WHERE id = %s AND loja = %s", (cliente_id, loja)).fetchone():
             return jsonify(error="Cliente inválido para esta loja."), 404
         saldo = _saldo_cliente(conn, loja, cliente_id)
     finally:
@@ -502,14 +509,14 @@ def fiado_listar():
                 FROM clientes c
                 LEFT JOIN (
                     SELECT cliente_id, SUM(total) AS total FROM pedidos
-                    WHERE loja = ? AND pago = 0 GROUP BY cliente_id
+                    WHERE loja = %s AND pago = 0 GROUP BY cliente_id
                 ) pf ON pf.cliente_id = c.id
                 LEFT JOIN (
                     SELECT cliente_id, SUM(valor) AS total FROM pagamentos
-                    WHERE loja = ? GROUP BY cliente_id
+                    WHERE loja = %s GROUP BY cliente_id
                 ) pg ON pg.cliente_id = c.id
-                WHERE c.loja = ?
-            )
+                WHERE c.loja = %s
+            ) AS s
             WHERE saldo > 0
             ORDER BY saldo DESC
         """, (loja, loja, loja)).fetchall()
@@ -527,12 +534,12 @@ def pedido_quitar(pedido_id: int):
     loja = current_loja()
     conn = get_conn()
     try:
-        cur = conn.execute("UPDATE pedidos SET pago = 1 WHERE id = ? AND loja = ?", (pedido_id, loja))
+        cur = conn.execute("UPDATE pedidos SET pago = 1 WHERE id = %s AND loja = %s", (pedido_id, loja))
         if cur.rowcount == 0:
             return jsonify(error="Pedido não encontrado."), 404
         conn.commit()
         return jsonify(ok=True, message="Pedido marcado como pago.")
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
         conn.close()
@@ -564,8 +571,8 @@ def usuarios_api():
     if request.method == "GET":
         usuarios = [dict(r) for r in conn.execute(
             "SELECT id, nome, login, papel, taxa_comissao, ativo, "
-            "(senha_hash IS NULL) AS convite_pendente "
-            "FROM usuarios WHERE loja = ? ORDER BY nome ASC",
+            "(senha_hash IS NULL)::int AS convite_pendente "
+            "FROM usuarios WHERE loja = %s ORDER BY nome ASC",
             (loja,)
         ).fetchall()]
         conn.close(); return jsonify(usuarios)
@@ -584,10 +591,10 @@ def usuarios_api():
         try:
             cur = conn.execute(
                 "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao, ativo, convite_token, convite_expira) "
-                "VALUES (?, ?, ?, NULL, 'operador', ?, 1, ?, ?)",
+                "VALUES (%s, %s, %s, NULL, 'operador', %s, 1, %s, %s) RETURNING id",
                 (loja, nome, login, taxa, token, expira),
             )
-            new_id = cur.lastrowid
+            new_id = cur.fetchone()["id"]
             conn.commit()
             convite_path = f"/convite/{token}"
             return jsonify(
@@ -596,7 +603,7 @@ def usuarios_api():
                 convite_url=request.host_url.rstrip("/") + convite_path,
                 convite_expira=expira,
             ), 201
-        except sqlite3.IntegrityError:
+        except psycopg.IntegrityError:
             conn.rollback(); return jsonify(error=f"Já existe um usuário com o login '{login}' nesta loja."), 409
         finally: conn.close()
 
@@ -609,7 +616,7 @@ def usuario_update_api(usuario_id: int):
     conn = get_conn()
     try:
         alvo = conn.execute(
-            "SELECT id, nome, papel, taxa_comissao, ativo FROM usuarios WHERE id = ? AND loja = ?",
+            "SELECT id, nome, papel, taxa_comissao, ativo FROM usuarios WHERE id = %s AND loja = %s",
             (usuario_id, loja)
         ).fetchone()
         if not alvo:
@@ -631,20 +638,20 @@ def usuario_update_api(usuario_id: int):
             return jsonify(error="Você não pode desativar a si mesmo."), 400
 
         conn.execute(
-            "UPDATE usuarios SET nome = ?, taxa_comissao = ?, ativo = ? WHERE id = ? AND loja = ?",
+            "UPDATE usuarios SET nome = %s, taxa_comissao = %s, ativo = %s WHERE id = %s AND loja = %s",
             (nome, taxa, ativo, usuario_id, loja),
         )
         senha_nova = (data.get("senha") or "").strip()
         if senha_nova:
             # Senha definida pelo admin substitui um convite pendente.
             conn.execute(
-                "UPDATE usuarios SET senha_hash = ?, convite_token = NULL, convite_expira = NULL "
-                "WHERE id = ? AND loja = ?",
+                "UPDATE usuarios SET senha_hash = %s, convite_token = NULL, convite_expira = NULL "
+                "WHERE id = %s AND loja = %s",
                 (generate_password_hash(senha_nova), usuario_id, loja),
             )
         conn.commit()
         return jsonify(ok=True, message="Usuário atualizado.")
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
         conn.close()
@@ -663,7 +670,7 @@ def pedidos_api():
         order_clause = order_options.get(sort_by, "p.id DESC")
         # ?status=orcamento lista os orçamentos; o default são os pedidos.
         status = "orcamento" if request.args.get("status") == "orcamento" else "pedido"
-        sql = f"SELECT p.id, p.data_iso, p.tecido, p.total, p.desconto, p.comissao_valor, p.status, c.nome AS cliente_nome, COALESCE(u.nome, '') AS vendedor_nome FROM pedidos p JOIN clientes c ON c.id = p.cliente_id LEFT JOIN usuarios u ON u.id = p.usuario_id WHERE p.loja = ? AND p.status = ? ORDER BY {order_clause} LIMIT 200"
+        sql = f"SELECT p.id, p.data_iso, p.tecido, p.total, p.desconto, p.comissao_valor, p.status, c.nome AS cliente_nome, COALESCE(u.nome, '') AS vendedor_nome FROM pedidos p JOIN clientes c ON c.id = p.cliente_id LEFT JOIN usuarios u ON u.id = p.usuario_id WHERE p.loja = %s AND p.status = %s ORDER BY {order_clause} LIMIT 200"
         pedidos_raw = conn.execute(sql, (loja, status)).fetchall()
         pedidos = [dict(p) for p in pedidos_raw]
         conn.close()
@@ -691,7 +698,7 @@ def pedidos_api():
             conn.close()
             return jsonify(error="Dados incompletos."), 400
 
-        if not conn.execute("SELECT 1 FROM clientes WHERE id = ? AND loja = ?", (cliente_id, loja)).fetchone():
+        if not conn.execute("SELECT 1 FROM clientes WHERE id = %s AND loja = %s", (cliente_id, loja)).fetchone():
             conn.close()
             return jsonify(error="Cliente inválido para esta loja."), 400
 
@@ -710,27 +717,26 @@ def pedidos_api():
         status = "orcamento" if is_orcamento else "pedido"
 
         try:
-            conn.execute("BEGIN")
-
             if descontar_estoque and not is_orcamento:
                 _baixar_estoque(conn, loja, tecido_nome,
                                 [(it.get("cor"), _ptbr_to_float(it.get("peso", 0))) for it in itens_in])
 
             now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
             cur_pedido = conn.execute(
-                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor, pago, status, descontar_estoque) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor, pago, status, descontar_estoque) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, usuario_id, comissao_taxa, comissao_valor, pago, status, int(descontar_estoque))
             )
-            pedido_id = cur_pedido.lastrowid
+            pedido_id = cur_pedido.fetchone()["id"]
 
             itens_to_insert = [(pedido_id, tecido_nome, it.get("cor"), _ptbr_to_float(it.get("peso"))) for it in itens_in]
-            conn.executemany("INSERT INTO itens_pedido (pedido_id, descricao, cor, peso_kg) VALUES (?, ?, ?, ?)", itens_to_insert)
+            with conn.cursor() as cur_itens:
+                cur_itens.executemany("INSERT INTO itens_pedido (pedido_id, descricao, cor, peso_kg) VALUES (%s, %s, %s, %s)", itens_to_insert)
             
             conn.commit()
         except EstoqueInsuficiente as e:
             conn.rollback()
             return jsonify(error=str(e)), 409
-        except sqlite3.Error as e:
+        except psycopg.Error as e:
             conn.rollback()
             return jsonify(error=f"Erro de banco de dados: {e}"), 500
         finally:
@@ -747,11 +753,10 @@ def pedido_converter_api(pedido_id: int):
     loja = current_loja()
     conn = get_conn()
     try:
-        # IMMEDIATE: trava a escrita já na leitura, para duas conversões
-        # simultâneas não baixarem o estoque duas vezes.
-        conn.execute("BEGIN IMMEDIATE")
+        # FOR UPDATE: trava a linha do orçamento já na leitura, para duas
+        # conversões simultâneas não baixarem o estoque duas vezes.
         pedido = conn.execute(
-            "SELECT id, tecido, total, usuario_id, status, descontar_estoque FROM pedidos WHERE id = ? AND loja = ?",
+            "SELECT id, tecido, total, usuario_id, status, descontar_estoque FROM pedidos WHERE id = %s AND loja = %s FOR UPDATE",
             (pedido_id, loja),
         ).fetchone()
         if not pedido:
@@ -764,7 +769,7 @@ def pedido_converter_api(pedido_id: int):
         # Venda casada (tecido não rastreado em estoque): o orçamento nasceu
         # com descontar_estoque=0 e a conversão não deve tocar no estoque.
         if pedido["descontar_estoque"]:
-            itens = conn.execute("SELECT cor, peso_kg FROM itens_pedido WHERE pedido_id = ?", (pedido_id,)).fetchall()
+            itens = conn.execute("SELECT cor, peso_kg FROM itens_pedido WHERE pedido_id = %s", (pedido_id,)).fetchall()
             _baixar_estoque(conn, loja, pedido["tecido"], [(i["cor"], i["peso_kg"]) for i in itens])
 
         vendedor = get_usuario_by_id(pedido["usuario_id"]) if pedido["usuario_id"] else None
@@ -774,8 +779,8 @@ def pedido_converter_api(pedido_id: int):
         # pedido cair no período certo dos relatórios.
         now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
         cur = conn.execute(
-            "UPDATE pedidos SET status = 'pedido', comissao_taxa = ?, comissao_valor = ?, data_iso = ? "
-            "WHERE id = ? AND loja = ? AND status = 'orcamento'",
+            "UPDATE pedidos SET status = 'pedido', comissao_taxa = %s, comissao_valor = %s, data_iso = %s "
+            "WHERE id = %s AND loja = %s AND status = 'orcamento'",
             (comissao_taxa, comissao_valor, now_iso, pedido_id, loja),
         )
         if cur.rowcount != 1:
@@ -784,7 +789,7 @@ def pedido_converter_api(pedido_id: int):
     except EstoqueInsuficiente as e:
         conn.rollback()
         return jsonify(error=str(e)), 409
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -804,11 +809,11 @@ def pedido_single_api(pedido_id: int):
         
     if request.method == "DELETE":
         try:
-            cur = conn.execute("DELETE FROM pedidos WHERE id = ? AND loja = ?", (pedido_id, loja))
+            cur = conn.execute("DELETE FROM pedidos WHERE id = %s AND loja = %s", (pedido_id, loja))
             if cur.rowcount == 0:
                 conn.close(); return jsonify(error="Pedido não encontrado."), 404
             conn.commit()
-        except sqlite3.Error as e:
+        except psycopg.Error as e:
             conn.rollback(); return jsonify(error=f"Erro no banco de dados: {e}"), 500
         finally: conn.close()
         return jsonify(ok=True)
@@ -826,30 +831,30 @@ def pedido_single_api(pedido_id: int):
             total_kg = sum(_ptbr_to_float(it.get("peso", 0)) for it in itens_in)
             total = round((total_kg * preco_unitario) - desconto, 2)
 
-            if not conn.execute("SELECT 1 FROM clientes WHERE id = ? AND loja = ?", (cliente_id, loja)).fetchone():
+            if not conn.execute("SELECT 1 FROM clientes WHERE id = %s AND loja = %s", (cliente_id, loja)).fetchone():
                 return jsonify(error="Cliente inválido para esta loja."), 400
 
-            conn.execute("BEGIN")
             # O vendedor (usuario_id) não muda na edição; a comissão é
             # recalculada sobre o novo total usando a taxa JÁ CONGELADA
             # no pedido, não a taxa atual do usuário.
             cur = conn.execute("""
-                UPDATE pedidos SET cliente_id=?, tecido=?, preco_unitario=?, desconto=?, total=?,
-                    comissao_valor = ROUND(? * comissao_taxa / 100, 2)
-                WHERE id=? AND loja=?
+                UPDATE pedidos SET cliente_id=%s, tecido=%s, preco_unitario=%s, desconto=%s, total=%s,
+                    comissao_valor = ROUND((%s * comissao_taxa / 100)::numeric, 2)
+                WHERE id=%s AND loja=%s
             """, (cliente_id, tecido_nome, preco_unitario, desconto, total, total, pedido_id, loja))
             if cur.rowcount == 0:
                 conn.rollback()
                 return jsonify(error="Pedido não encontrado."), 404
 
-            conn.execute("DELETE FROM itens_pedido WHERE pedido_id=?", (pedido_id,))
+            conn.execute("DELETE FROM itens_pedido WHERE pedido_id=%s", (pedido_id,))
             
             itens_to_insert = [(pedido_id, tecido_nome, it.get("cor"), _ptbr_to_float(it.get("peso"))) for it in itens_in]
-            conn.executemany("INSERT INTO itens_pedido (pedido_id, descricao, cor, peso_kg) VALUES (?, ?, ?, ?)", itens_to_insert)
+            with conn.cursor() as cur_itens:
+                cur_itens.executemany("INSERT INTO itens_pedido (pedido_id, descricao, cor, peso_kg) VALUES (%s, %s, %s, %s)", itens_to_insert)
             
             conn.commit()
             return jsonify(ok=True, message="Pedido atualizado.")
-        except sqlite3.Error as e:
+        except psycopg.Error as e:
             conn.rollback()
             return jsonify(error=f"Erro no banco de dados: {e}"), 500
         finally:
@@ -863,12 +868,12 @@ def pedido_single_api(pedido_id: int):
 def get_estoque():
     loja = current_loja()
     conn = get_conn()
-    tecidos_raw = conn.execute("SELECT id, nome_tecido FROM estoque_tecidos WHERE loja = ? ORDER BY nome_tecido", (loja,)).fetchall()
+    tecidos_raw = conn.execute("SELECT id, nome_tecido FROM estoque_tecidos WHERE loja = %s ORDER BY nome_tecido", (loja,)).fetchall()
     
     estoque = []
     for tecido in tecidos_raw:
         cores = conn.execute(
-            "SELECT id, nome_cor, peso_kg, qtd_pecas, estoque_minimo FROM estoque_cores WHERE tecido_id = ? ORDER BY nome_cor",
+            "SELECT id, nome_cor, peso_kg, qtd_pecas, estoque_minimo FROM estoque_cores WHERE tecido_id = %s ORDER BY nome_cor",
             (tecido['id'],)
         ).fetchall()
         estoque.append({
@@ -895,11 +900,11 @@ def add_tecido_estoque():
     
     conn = get_conn()
     try:
-        cur = conn.execute("INSERT INTO estoque_tecidos (nome_tecido, loja) VALUES (?, ?)", (nome_tecido, loja))
-        new_id = cur.lastrowid
+        cur = conn.execute("INSERT INTO estoque_tecidos (nome_tecido, loja) VALUES (%s, %s) RETURNING id", (nome_tecido, loja))
+        new_id = cur.fetchone()["id"]
         conn.commit()
         return jsonify(id=new_id, nome_tecido=nome_tecido), 201
-    except sqlite3.IntegrityError:
+    except psycopg.IntegrityError:
         conn.rollback()
         return jsonify(error=f"O tecido '{nome_tecido}' já está cadastrado."), 409
     finally:
@@ -922,23 +927,23 @@ def add_cor_estoque():
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM estoque_tecidos WHERE id = ? AND loja = ?", (tecido_id, loja))
+        cur.execute("SELECT 1 FROM estoque_tecidos WHERE id = %s AND loja = %s", (tecido_id, loja))
         if not cur.fetchone():
             return jsonify(error="Tecido não encontrado nesta loja."), 404
-        cur.execute("SELECT id, peso_kg, qtd_pecas FROM estoque_cores WHERE tecido_id = ? AND nome_cor = ?", (tecido_id, nome_cor))
+        cur.execute("SELECT id, peso_kg, qtd_pecas FROM estoque_cores WHERE tecido_id = %s AND nome_cor = %s", (tecido_id, nome_cor))
         existing = cur.fetchone()
         
         if existing:
             novo_peso = existing['peso_kg'] + peso_kg
             novas_pecas = existing['qtd_pecas'] + qtd_pecas
-            cur.execute("UPDATE estoque_cores SET peso_kg = ?, qtd_pecas = ? WHERE id = ?", (novo_peso, novas_pecas, existing['id']))
+            cur.execute("UPDATE estoque_cores SET peso_kg = %s, qtd_pecas = %s WHERE id = %s", (novo_peso, novas_pecas, existing['id']))
         else:
-            cur.execute("INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (?, ?, ?, ?)",
+            cur.execute("INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (%s, %s, %s, %s)",
                         (tecido_id, nome_cor, peso_kg, qtd_pecas))
         
         conn.commit()
         return jsonify(ok=True, message="Estoque atualizado."), 200
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -950,7 +955,7 @@ def add_cor_estoque():
 def delete_tecido(tecido_id):
     loja = current_loja()
     conn = get_conn()
-    cur = conn.execute("DELETE FROM estoque_tecidos WHERE id = ? AND loja = ?", (tecido_id, loja))
+    cur = conn.execute("DELETE FROM estoque_tecidos WHERE id = %s AND loja = %s", (tecido_id, loja))
     if cur.rowcount == 0:
         conn.close()
         return jsonify(error="Tecido não encontrado ou não pertence a esta loja."), 404
@@ -965,7 +970,7 @@ def delete_cor(cor_id):
     loja = current_loja()
     conn = get_conn()
     cur = conn.execute(
-        "DELETE FROM estoque_cores WHERE id = ? AND tecido_id IN (SELECT id FROM estoque_tecidos WHERE loja = ?)",
+        "DELETE FROM estoque_cores WHERE id = %s AND tecido_id IN (SELECT id FROM estoque_tecidos WHERE loja = %s)",
         (cor_id, loja)
     )
     if cur.rowcount == 0:
@@ -990,7 +995,7 @@ def update_cor_estoque(cor_id):
     conn = get_conn()
     try:
         cur = conn.execute(
-            "UPDATE estoque_cores SET peso_kg = ?, qtd_pecas = ? WHERE id = ? AND tecido_id IN (SELECT id FROM estoque_tecidos WHERE loja = ?)",
+            "UPDATE estoque_cores SET peso_kg = %s, qtd_pecas = %s WHERE id = %s AND tecido_id IN (SELECT id FROM estoque_tecidos WHERE loja = %s)",
             (novo_peso_kg, novas_qtd_pecas, cor_id, loja)
         )
         
@@ -999,7 +1004,7 @@ def update_cor_estoque(cor_id):
             
         conn.commit()
         return jsonify(ok=True, message="Estoque ajustado com sucesso.")
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
         conn.close()
@@ -1017,14 +1022,14 @@ def update_cor_minimo(cor_id):
     conn = get_conn()
     try:
         cur = conn.execute(
-            "UPDATE estoque_cores SET estoque_minimo = ? WHERE id = ? AND tecido_id IN (SELECT id FROM estoque_tecidos WHERE loja = ?)",
+            "UPDATE estoque_cores SET estoque_minimo = %s WHERE id = %s AND tecido_id IN (SELECT id FROM estoque_tecidos WHERE loja = %s)",
             (minimo, cor_id, loja)
         )
         if cur.rowcount == 0:
             return jsonify(error="Cor não encontrada no estoque."), 404
         conn.commit()
         return jsonify(ok=True, estoque_minimo=minimo)
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
         conn.close()
@@ -1175,11 +1180,10 @@ def registrar_entrada():
 
     conn = get_conn()
     try:
-        conn.execute("BEGIN")
         if ids_rolo:
-            marcas = ",".join("?" * len(ids_rolo))
+            marcas = ",".join(["%s"] * len(ids_rolo))
             ja = [r["roll_ext_id"] for r in conn.execute(
-                f"SELECT roll_ext_id FROM rolos WHERE loja = ? AND roll_ext_id IN ({marcas})",
+                f"SELECT roll_ext_id FROM rolos WHERE loja = %s AND roll_ext_id IN ({marcas})",
                 (loja, *ids_rolo),
             ).fetchall()]
             if ja:
@@ -1191,7 +1195,7 @@ def registrar_entrada():
         # um nome de tecido errado vira erro, não um tecido novo silencioso.
         tecidos = {
             r["nome_tecido"].casefold(): (r["id"], r["nome_tecido"])
-            for r in conn.execute("SELECT id, nome_tecido FROM estoque_tecidos WHERE loja = ?", (loja,)).fetchall()
+            for r in conn.execute("SELECT id, nome_tecido FROM estoque_tecidos WHERE loja = %s", (loja,)).fetchall()
         }
         desconhecidos = sorted({l["tecido"] for l in linhas if l["tecido"].casefold() not in tecidos})
         if desconhecidos:
@@ -1199,9 +1203,9 @@ def registrar_entrada():
             return jsonify(error=f"Tecido(s) não cadastrado(s) no estoque: {', '.join(desconhecidos)}. Cadastre o tecido antes da entrada."), 400
 
         entrada_id = conn.execute(
-            "INSERT INTO entradas (loja, fornecedor, data) VALUES (?, ?, ?)",
+            "INSERT INTO entradas (loja, fornecedor, data) VALUES (%s, %s, %s) RETURNING id",
             (loja, fornecedor, data_entrada),
-        ).lastrowid
+        ).fetchone()["id"]
 
         cores_cache = {}
         cores_criadas = []
@@ -1210,28 +1214,28 @@ def registrar_entrada():
             if tecido_id not in cores_cache:
                 cores_cache[tecido_id] = {
                     r["nome_cor"].casefold(): (r["id"], r["nome_cor"])
-                    for r in conn.execute("SELECT id, nome_cor FROM estoque_cores WHERE tecido_id = ?", (tecido_id,)).fetchall()
+                    for r in conn.execute("SELECT id, nome_cor FROM estoque_cores WHERE tecido_id = %s", (tecido_id,)).fetchall()
                 }
             cores = cores_cache[tecido_id]
             chave = l["cor"].casefold()
             if chave in cores:
                 cor_id, cor_nome = cores[chave]
-                conn.execute("UPDATE estoque_cores SET peso_kg = ROUND(peso_kg + ?, 3) WHERE id = ?", (l["peso"], cor_id))
+                conn.execute("UPDATE estoque_cores SET peso_kg = ROUND((peso_kg + %s)::numeric, 3) WHERE id = %s", (l["peso"], cor_id))
             else:
                 cor_nome = l["cor"]
                 cor_id = conn.execute(
-                    "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (?, ?, ?, 0)",
+                    "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (%s, %s, %s, 0) RETURNING id",
                     (tecido_id, cor_nome, l["peso"]),
-                ).lastrowid
+                ).fetchone()["id"]
                 cores[chave] = (cor_id, cor_nome)
                 cores_criadas.append({"tecido": tecido_nome, "cor": cor_nome})
             if l["id_rolo"]:
                 conn.execute(
-                    "INSERT INTO rolos (loja, entrada_id, tecido, cor, roll_ext_id, peso) VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO rolos (loja, entrada_id, tecido, cor, roll_ext_id, peso) VALUES (%s, %s, %s, %s, %s, %s)",
                     (loja, entrada_id, tecido_nome, cor_nome, l["id_rolo"], l["peso"]),
                 )
         conn.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -1257,13 +1261,13 @@ def _get_encomenda(encomenda_id, loja):
     conn = get_conn()
     try:
         enc = conn.execute(
-            "SELECT id, loja, fornecedor, data_prevista, status, created_at FROM encomendas WHERE id = ? AND loja = ?",
+            "SELECT id, loja, fornecedor, data_prevista, status, created_at FROM encomendas WHERE id = %s AND loja = %s",
             (encomenda_id, loja),
         ).fetchone()
         if not enc:
             return None, None
         itens = conn.execute(
-            "SELECT id, tecido, cor, peso_previsto, rolos_previstos FROM encomenda_itens WHERE encomenda_id = ? ORDER BY id",
+            "SELECT id, tecido, cor, peso_previsto, rolos_previstos FROM encomenda_itens WHERE encomenda_id = %s ORDER BY id",
             (encomenda_id,),
         ).fetchall()
         return dict(enc), [dict(i) for i in itens]
@@ -1339,17 +1343,17 @@ def criar_encomenda():
 
     conn = get_conn()
     try:
-        conn.execute("BEGIN")
         encomenda_id = conn.execute(
-            "INSERT INTO encomendas (loja, fornecedor, data_prevista, status) VALUES (?, ?, ?, 'aberta')",
+            "INSERT INTO encomendas (loja, fornecedor, data_prevista, status) VALUES (%s, %s, %s, 'aberta') RETURNING id",
             (loja, fornecedor, data_prevista),
-        ).lastrowid
-        conn.executemany(
-            "INSERT INTO encomenda_itens (encomenda_id, tecido, cor, peso_previsto, rolos_previstos) VALUES (?, ?, ?, ?, ?)",
-            [(encomenda_id, it["tecido"], it["cor"], it["peso_previsto"], it["rolos_previstos"]) for it in itens],
-        )
+        ).fetchone()["id"]
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO encomenda_itens (encomenda_id, tecido, cor, peso_previsto, rolos_previstos) VALUES (%s, %s, %s, %s, %s)",
+                [(encomenda_id, it["tecido"], it["cor"], it["peso_previsto"], it["rolos_previstos"]) for it in itens],
+            )
         conn.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -1366,10 +1370,10 @@ def listar_encomendas():
     status = (request.args.get("status") or "").strip()
     conn = get_conn()
     try:
-        query = "SELECT id, fornecedor, data_prevista, status, created_at FROM encomendas WHERE loja = ?"
+        query = "SELECT id, fornecedor, data_prevista, status, created_at FROM encomendas WHERE loja = %s"
         params = [loja]
         if status:
-            query += " AND status = ?"
+            query += " AND status = %s"
             params.append(status)
         query += " ORDER BY id DESC"
         rows = conn.execute(query, params).fetchall()
@@ -1419,11 +1423,10 @@ def receber_encomenda(encomenda_id):
 
     conn = get_conn()
     try:
-        conn.execute("BEGIN")
         if ids_rolo:
-            marcas = ",".join("?" * len(ids_rolo))
+            marcas = ",".join(["%s"] * len(ids_rolo))
             ja = [r["roll_ext_id"] for r in conn.execute(
-                f"SELECT roll_ext_id FROM rolos WHERE loja = ? AND roll_ext_id IN ({marcas})",
+                f"SELECT roll_ext_id FROM rolos WHERE loja = %s AND roll_ext_id IN ({marcas})",
                 (loja, *ids_rolo),
             ).fetchall()]
             if ja:
@@ -1432,7 +1435,7 @@ def receber_encomenda(encomenda_id):
 
         tecidos = {
             r["nome_tecido"].casefold(): (r["id"], r["nome_tecido"])
-            for r in conn.execute("SELECT id, nome_tecido FROM estoque_tecidos WHERE loja = ?", (loja,)).fetchall()
+            for r in conn.execute("SELECT id, nome_tecido FROM estoque_tecidos WHERE loja = %s", (loja,)).fetchall()
         }
         desconhecidos = sorted({l["tecido"] for l in linhas if l["tecido"].casefold() not in tecidos})
         if desconhecidos:
@@ -1440,9 +1443,9 @@ def receber_encomenda(encomenda_id):
             return jsonify(error=f"Tecido(s) não cadastrado(s) no estoque: {', '.join(desconhecidos)}. Cadastre o tecido antes de receber."), 400
 
         entrada_id = conn.execute(
-            "INSERT INTO entradas (loja, fornecedor, data) VALUES (?, ?, ?)",
+            "INSERT INTO entradas (loja, fornecedor, data) VALUES (%s, %s, %s) RETURNING id",
             (loja, fornecedor, data_recebimento),
-        ).lastrowid
+        ).fetchone()["id"]
 
         cores_cache = {}
         cores_criadas = []
@@ -1451,30 +1454,30 @@ def receber_encomenda(encomenda_id):
             if tecido_id not in cores_cache:
                 cores_cache[tecido_id] = {
                     r["nome_cor"].casefold(): (r["id"], r["nome_cor"])
-                    for r in conn.execute("SELECT id, nome_cor FROM estoque_cores WHERE tecido_id = ?", (tecido_id,)).fetchall()
+                    for r in conn.execute("SELECT id, nome_cor FROM estoque_cores WHERE tecido_id = %s", (tecido_id,)).fetchall()
                 }
             cores = cores_cache[tecido_id]
             chave = l["cor"].casefold()
             if chave in cores:
                 cor_id, cor_nome = cores[chave]
-                conn.execute("UPDATE estoque_cores SET peso_kg = ROUND(peso_kg + ?, 3) WHERE id = ?", (l["peso"], cor_id))
+                conn.execute("UPDATE estoque_cores SET peso_kg = ROUND((peso_kg + %s)::numeric, 3) WHERE id = %s", (l["peso"], cor_id))
             else:
                 cor_nome = l["cor"]
                 cor_id = conn.execute(
-                    "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (?, ?, ?, 0)",
+                    "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (%s, %s, %s, 0) RETURNING id",
                     (tecido_id, cor_nome, l["peso"]),
-                ).lastrowid
+                ).fetchone()["id"]
                 cores[chave] = (cor_id, cor_nome)
                 cores_criadas.append({"tecido": tecido_nome, "cor": cor_nome})
             if l["id_rolo"]:
                 conn.execute(
-                    "INSERT INTO rolos (loja, entrada_id, tecido, cor, roll_ext_id, peso) VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO rolos (loja, entrada_id, tecido, cor, roll_ext_id, peso) VALUES (%s, %s, %s, %s, %s, %s)",
                     (loja, entrada_id, tecido_nome, cor_nome, l["id_rolo"], l["peso"]),
                 )
 
-        conn.execute("UPDATE encomendas SET status = 'recebida' WHERE id = ?", (encomenda_id,))
+        conn.execute("UPDATE encomendas SET status = 'recebida' WHERE id = %s", (encomenda_id,))
         conn.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -1513,7 +1516,7 @@ def _periodo_from_args():
 
     Retorna (de, ate, ate_exclusivo): como data_iso é texto "YYYY-MM-DD HH:MM",
     o filtro correto por string é de <= data_iso < ate + 1 dia, cobrindo o
-    fim do dia final sem depender de parsing de datas no SQLite.
+    fim do dia final sem depender de parsing de datas no banco.
     """
     def _parse(s):
         try:
@@ -1541,7 +1544,7 @@ def relatorio_loja():
     try:
         tot = conn.execute(
             "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat "
-            "FROM pedidos WHERE loja = ? AND status = 'pedido' AND data_iso >= ? AND data_iso < ?",
+            "FROM pedidos WHERE loja = %s AND status = 'pedido' AND data_iso >= %s AND data_iso < %s",
             (loja, de, ate_ex),
         ).fetchone()
         num_pedidos = tot["n"]
@@ -1553,7 +1556,7 @@ def relatorio_loja():
             conn.execute(
                 "SELECT COALESCE(SUM(p.comissao_valor), 0) AS com FROM pedidos p "
                 "LEFT JOIN usuarios u ON u.id = p.usuario_id "
-                "WHERE p.loja = ? AND p.status = 'pedido' AND p.data_iso >= ? AND p.data_iso < ? "
+                "WHERE p.loja = %s AND p.status = 'pedido' AND p.data_iso >= %s AND p.data_iso < %s "
                 "AND COALESCE(u.papel, '') != 'admin'",
                 (loja, de, ate_ex),
             ).fetchone()["com"],
@@ -1572,8 +1575,8 @@ def relatorio_loja():
                 "SELECT p.usuario_id, COALESCE(u.nome, '') AS nome, COUNT(*) AS num_pedidos, "
                 "COALESCE(SUM(p.total), 0) AS faturamento, COALESCE(SUM(p.comissao_valor), 0) AS comissao "
                 "FROM pedidos p LEFT JOIN usuarios u ON u.id = p.usuario_id "
-                "WHERE p.loja = ? AND p.status = 'pedido' AND p.data_iso >= ? AND p.data_iso < ? "
-                "GROUP BY p.usuario_id ORDER BY faturamento DESC",
+                "WHERE p.loja = %s AND p.status = 'pedido' AND p.data_iso >= %s AND p.data_iso < %s "
+                "GROUP BY p.usuario_id, u.nome ORDER BY faturamento DESC",
                 (loja, de, ate_ex),
             ).fetchall()
         ]
@@ -1588,10 +1591,10 @@ def relatorio_loja():
                 "SELECT p.tecido, COALESCE(SUM(p.total), 0) AS faturamento, "
                 "COALESCE((SELECT SUM(i.peso_kg) FROM itens_pedido i "
                 "          JOIN pedidos p2 ON p2.id = i.pedido_id "
-                "          WHERE p2.loja = ? AND p2.status = 'pedido' AND p2.tecido = p.tecido "
-                "            AND p2.data_iso >= ? AND p2.data_iso < ?), 0) AS peso_total "
+                "          WHERE p2.loja = %s AND p2.status = 'pedido' AND p2.tecido = p.tecido "
+                "            AND p2.data_iso >= %s AND p2.data_iso < %s), 0) AS peso_total "
                 "FROM pedidos p "
-                "WHERE p.loja = ? AND p.status = 'pedido' AND p.data_iso >= ? AND p.data_iso < ? "
+                "WHERE p.loja = %s AND p.status = 'pedido' AND p.data_iso >= %s AND p.data_iso < %s "
                 "GROUP BY p.tecido ORDER BY faturamento DESC",
                 (loja, de, ate_ex, loja, de, ate_ex),
             ).fetchall()
@@ -1601,9 +1604,9 @@ def relatorio_loja():
             r["nome_tecido"]
             for r in conn.execute(
                 "SELECT nome_tecido FROM estoque_tecidos "
-                "WHERE loja = ? AND nome_tecido NOT IN ("
+                "WHERE loja = %s AND nome_tecido NOT IN ("
                 "  SELECT DISTINCT tecido FROM pedidos "
-                "  WHERE loja = ? AND status = 'pedido' AND data_iso >= ? AND data_iso < ? AND tecido IS NOT NULL"
+                "  WHERE loja = %s AND status = 'pedido' AND data_iso >= %s AND data_iso < %s AND tecido IS NOT NULL"
                 ") ORDER BY nome_tecido",
                 (loja, loja, de, ate_ex),
             ).fetchall()
@@ -1650,7 +1653,7 @@ def relatorio_meu():
     try:
         tot = conn.execute(
             "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat, COALESCE(SUM(comissao_valor), 0) AS com "
-            "FROM pedidos WHERE loja = ? AND usuario_id = ? AND status = 'pedido' AND data_iso >= ? AND data_iso < ?",
+            "FROM pedidos WHERE loja = %s AND usuario_id = %s AND status = 'pedido' AND data_iso >= %s AND data_iso < %s",
             (loja, usuario_id, de, ate_ex),
         ).fetchone()
         ultimos = [
@@ -1664,7 +1667,7 @@ def relatorio_meu():
             for r in conn.execute(
                 "SELECT p.id, p.data_iso, COALESCE(c.nome, '') AS cliente_nome, p.total, p.comissao_valor "
                 "FROM pedidos p LEFT JOIN clientes c ON c.id = p.cliente_id "
-                "WHERE p.loja = ? AND p.usuario_id = ? AND p.status = 'pedido' AND p.data_iso >= ? AND p.data_iso < ? "
+                "WHERE p.loja = %s AND p.usuario_id = %s AND p.status = 'pedido' AND p.data_iso >= %s AND p.data_iso < %s "
                 "ORDER BY p.id DESC LIMIT 10",
                 (loja, usuario_id, de, ate_ex),
             ).fetchall()
@@ -1700,7 +1703,7 @@ def _despesas_resumo(conn, loja, de, ate_ex):
         for r in conn.execute(
             "SELECT COALESCE(NULLIF(TRIM(categoria), ''), 'Sem categoria') AS categoria, "
             "SUM(valor) AS total FROM despesas "
-            "WHERE loja = ? AND data >= ? AND data < ? "
+            "WHERE loja = %s AND data >= %s AND data < %s "
             "GROUP BY 1 ORDER BY total DESC",
             (loja, de, ate_ex),
         ).fetchall()
@@ -1847,12 +1850,13 @@ def despesas_importar():
 
     conn = get_conn()
     try:
-        conn.executemany(
-            "INSERT INTO despesas (loja, data, descricao, categoria, valor) VALUES (?, ?, ?, ?, ?)",
-            validas,
-        )
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO despesas (loja, data, descricao, categoria, valor) VALUES (%s, %s, %s, %s, %s)",
+                validas,
+            )
         conn.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -1875,7 +1879,7 @@ def despesas_listar():
     try:
         despesas = [dict(r) for r in conn.execute(
             "SELECT id, data, descricao, categoria, valor, recorrente_id FROM despesas "
-            "WHERE loja = ? AND data >= ? AND data < ? ORDER BY data DESC, id DESC",
+            "WHERE loja = %s AND data >= %s AND data < %s ORDER BY data DESC, id DESC",
             (loja, de, ate_ex),
         ).fetchall()]
         total, por_categoria = _despesas_resumo(conn, loja, de, ate_ex)
@@ -1892,7 +1896,7 @@ def despesa_delete(despesa_id):
     loja = current_loja()
     conn = get_conn()
     try:
-        cur = conn.execute("DELETE FROM despesas WHERE id = ? AND loja = ?", (despesa_id, loja))
+        cur = conn.execute("DELETE FROM despesas WHERE id = %s AND loja = %s", (despesa_id, loja))
         if cur.rowcount == 0:
             return jsonify(error="Despesa não encontrada."), 404
         conn.commit()
@@ -1919,11 +1923,11 @@ def despesa_criar():
     conn = get_conn()
     try:
         new_id = conn.execute(
-            "INSERT INTO despesas (loja, data, descricao, categoria, valor) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO despesas (loja, data, descricao, categoria, valor) VALUES (%s, %s, %s, %s, %s) RETURNING id",
             (loja, data_iso, descricao, categoria, round(valor, 2)),
-        ).lastrowid
+        ).fetchone()["id"]
         conn.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -1947,7 +1951,7 @@ def recorrentes_listar():
     try:
         rows = conn.execute(
             "SELECT id, nome, categoria, ativo FROM despesas_recorrentes "
-            "WHERE loja = ? ORDER BY ativo DESC, nome COLLATE NOCASE",
+            "WHERE loja = %s ORDER BY ativo DESC, LOWER(nome)",
             (loja,),
         ).fetchall()
     finally:
@@ -1968,11 +1972,11 @@ def recorrente_criar():
     conn = get_conn()
     try:
         new_id = conn.execute(
-            "INSERT INTO despesas_recorrentes (loja, nome, categoria) VALUES (?, ?, ?)",
+            "INSERT INTO despesas_recorrentes (loja, nome, categoria) VALUES (%s, %s, %s) RETURNING id",
             (loja, nome, categoria),
-        ).lastrowid
+        ).fetchone()["id"]
         conn.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -1990,7 +1994,7 @@ def recorrente_editar(recorrente_id):
     conn = get_conn()
     try:
         atual = conn.execute(
-            "SELECT id, nome, categoria, ativo FROM despesas_recorrentes WHERE id = ? AND loja = ?",
+            "SELECT id, nome, categoria, ativo FROM despesas_recorrentes WHERE id = %s AND loja = %s",
             (recorrente_id, loja),
         ).fetchone()
         if not atual:
@@ -2001,14 +2005,14 @@ def recorrente_editar(recorrente_id):
         categoria = str(data.get("categoria") or "").strip() if "categoria" in data else atual["categoria"]
         ativo = (1 if data["ativo"] in (1, True, "1", "true") else 0) if "ativo" in data else atual["ativo"]
         conn.execute(
-            "UPDATE despesas_recorrentes SET nome = ?, categoria = ?, ativo = ? WHERE id = ? AND loja = ?",
+            "UPDATE despesas_recorrentes SET nome = %s, categoria = %s, ativo = %s WHERE id = %s AND loja = %s",
             (nome, categoria, ativo, recorrente_id, loja),
         )
         conn.commit()
         row = conn.execute(
-            "SELECT id, nome, categoria, ativo FROM despesas_recorrentes WHERE id = ?", (recorrente_id,)
+            "SELECT id, nome, categoria, ativo FROM despesas_recorrentes WHERE id = %s", (recorrente_id,)
         ).fetchone()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -2030,7 +2034,7 @@ def recorrentes_sugestao():
             "          WHERE d.recorrente_id = r.id AND d.loja = r.loja "
             "          ORDER BY d.data DESC, d.id DESC LIMIT 1), 0) AS valor_sugerido "
             "FROM despesas_recorrentes r "
-            "WHERE r.loja = ? AND r.ativo = 1 ORDER BY r.nome COLLATE NOCASE",
+            "WHERE r.loja = %s AND r.ativo = 1 ORDER BY LOWER(r.nome)",
             (loja,),
         ).fetchall()
     finally:
@@ -2059,7 +2063,7 @@ def despesas_lancar_mes():
     try:
         modelos = {
             r["id"]: r for r in conn.execute(
-                "SELECT id, nome, categoria FROM despesas_recorrentes WHERE loja = ? AND ativo = 1",
+                "SELECT id, nome, categoria FROM despesas_recorrentes WHERE loja = %s AND ativo = 1",
                 (loja,),
             ).fetchall()
         }
@@ -2087,13 +2091,14 @@ def despesas_lancar_mes():
                                 round(valor, 2), rid))
         if not validas:
             return jsonify(error="Nenhum item válido para lançar.", erros=erros), 400
-        conn.executemany(
-            "INSERT INTO despesas (loja, data, descricao, categoria, valor, recorrente_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            validas,
-        )
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO despesas (loja, data, descricao, categoria, valor, recorrente_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                validas,
+            )
         conn.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback()
         return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -2155,7 +2160,7 @@ def admin_get_todas_lojas():
 @require_admin
 def admin_aprovar_loja(codigo_loja):
     conn = get_conn()
-    conn.execute("UPDATE lojas SET status = 'aprovado' WHERE codigo = ?", (codigo_loja,))
+    conn.execute("UPDATE lojas SET status = 'aprovado' WHERE codigo = %s", (codigo_loja,))
     conn.commit(); conn.close()
     return jsonify(ok=True, message=f"Loja {codigo_loja} aprovada.")
 
@@ -2163,7 +2168,7 @@ def admin_aprovar_loja(codigo_loja):
 @require_admin
 def admin_revogar_loja(codigo_loja):
     conn = get_conn()
-    conn.execute("UPDATE lojas SET status = 'revogado' WHERE codigo = ?", (codigo_loja,))
+    conn.execute("UPDATE lojas SET status = 'revogado' WHERE codigo = %s", (codigo_loja,))
     conn.commit(); conn.close()
     return jsonify(ok=True, message=f"Acesso da loja {codigo_loja} foi revogado.")
 
@@ -2171,7 +2176,7 @@ def admin_revogar_loja(codigo_loja):
 @require_admin
 def admin_reativar_loja(codigo_loja):
     conn = get_conn()
-    conn.execute("UPDATE lojas SET status = 'aprovado' WHERE codigo = ?", (codigo_loja,))
+    conn.execute("UPDATE lojas SET status = 'aprovado' WHERE codigo = %s", (codigo_loja,))
     conn.commit(); conn.close()
     return jsonify(ok=True, message=f"Acesso da loja {codigo_loja} foi reativado.")
 
@@ -2180,11 +2185,11 @@ def admin_reativar_loja(codigo_loja):
 def admin_deletar_loja(codigo_loja):
     conn = get_conn()
     try:
-        cur = conn.execute("DELETE FROM lojas WHERE codigo = ?", (codigo_loja,))
+        cur = conn.execute("DELETE FROM lojas WHERE codigo = %s", (codigo_loja,))
         if cur.rowcount == 0:
             conn.close(); return jsonify(error="Loja não encontrada."), 404
         conn.commit()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         conn.rollback(); return jsonify(error=f"Erro no banco de dados: {e}"), 500
     finally: conn.close()
     return jsonify(ok=True, message=f"Loja {codigo_loja} deletada com sucesso.")

@@ -2,7 +2,6 @@
 # reenquadramento da comissão como despesa do dono ("a pagar").
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -16,10 +15,6 @@ import database
 # app.py exige SECRET_KEY e ADMIN_TOKEN no import (boot fail-fast).
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
-
-# Redireciona o banco para um arquivo temporário ANTES de importar o app.
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
 
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
@@ -41,10 +36,6 @@ def _login(login):
 @pytest.fixture()
 def ctx():
     """Loja aprovada com admin, operador (taxa 10%) e gerente (taxa 0)."""
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
-
     admin = app.test_client()
     resp = admin.post(
         "/auth/signup",
@@ -53,17 +44,17 @@ def ctx():
     assert resp.status_code == 201
 
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", (LOJA,))
-    cur = conn.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente X', ?)", (LOJA,))
-    cliente_id = cur.lastrowid
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", (LOJA,))
+    cur = conn.execute("INSERT INTO clientes (nome, loja) VALUES ('Cliente X', %s) RETURNING id", (LOJA,))
+    cliente_id = cur.fetchone()["id"]
     # Ainda não há UI para criar gerente: o papel nasce direto no banco.
     conn.execute(
         "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao) "
-        "VALUES (?, 'Gerente Um', 'gerente', ?, 'gerente', 0)",
+        "VALUES (%s, 'Gerente Um', 'gerente', %s, 'gerente', 0)",
         (LOJA, generate_password_hash(SENHA)),
     )
     admin_id = conn.execute(
-        "SELECT id FROM usuarios WHERE loja=? AND login='admin'", (LOJA,)
+        "SELECT id FROM usuarios WHERE loja=%s AND login='admin'", (LOJA,)
     ).fetchone()["id"]
     conn.commit()
     conn.close()
@@ -84,7 +75,6 @@ def ctx():
         "cliente_id": cliente_id,
         "admin_id": admin_id,
     }
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _post_pedido(c, cliente_id, peso="1,0", preco="10,00"):
@@ -105,7 +95,7 @@ def _post_pedido(c, cliente_id, peso="1,0", preco="10,00"):
 def test_schema_aceita_papel_gerente(ctx):
     conn = database.get_conn()
     papel = conn.execute(
-        "SELECT papel FROM usuarios WHERE loja=? AND login='gerente'", (LOJA,)
+        "SELECT papel FROM usuarios WHERE loja=%s AND login='gerente'", (LOJA,)
     ).fetchone()["papel"]
     conn.close()
     assert papel == "gerente"
@@ -206,7 +196,7 @@ def test_venda_do_admin_nao_gera_comissao(ctx):
     pedido_id = _post_pedido(ctx["admin"], ctx["cliente_id"]).get_json()["id"]
     conn = database.get_conn()
     pedido = conn.execute(
-        "SELECT comissao_taxa, comissao_valor FROM pedidos WHERE id=?", (pedido_id,)
+        "SELECT comissao_taxa, comissao_valor FROM pedidos WHERE id=%s", (pedido_id,)
     ).fetchone()
     conn.close()
     assert pedido["comissao_taxa"] == 0
@@ -217,14 +207,14 @@ def test_venda_do_admin_nao_gera_comissao_nem_com_taxa_no_banco(ctx):
     # Mesmo que uma taxa escape para o banco (legado/import), a venda do
     # dono não pode virar comissão.
     conn = database.get_conn()
-    conn.execute("UPDATE usuarios SET taxa_comissao=15 WHERE id=?", (ctx["admin_id"],))
+    conn.execute("UPDATE usuarios SET taxa_comissao=15 WHERE id=%s", (ctx["admin_id"],))
     conn.commit()
     conn.close()
 
     pedido_id = _post_pedido(ctx["admin"], ctx["cliente_id"]).get_json()["id"]
     conn = database.get_conn()
     pedido = conn.execute(
-        "SELECT comissao_valor FROM pedidos WHERE id=?", (pedido_id,)
+        "SELECT comissao_valor FROM pedidos WHERE id=%s", (pedido_id,)
     ).fetchone()
     conn.close()
     assert pedido["comissao_valor"] == 0
@@ -236,7 +226,7 @@ def test_taxa_do_admin_nao_e_editavel(ctx):
 
     conn = database.get_conn()
     taxa = conn.execute(
-        "SELECT taxa_comissao FROM usuarios WHERE id=?", (ctx["admin_id"],)
+        "SELECT taxa_comissao FROM usuarios WHERE id=%s", (ctx["admin_id"],)
     ).fetchone()["taxa_comissao"]
     conn.close()
     assert taxa == 0

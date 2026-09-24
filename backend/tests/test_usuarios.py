@@ -2,7 +2,6 @@
 # usuário admin, login por usuário, revalidação de sessão e papéis.
 import os
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
@@ -17,11 +16,6 @@ import database
 os.environ.setdefault("SECRET_KEY", "secret-de-teste")
 os.environ.setdefault("ADMIN_TOKEN", "token-admin-de-teste")
 
-# Redireciona o banco para um arquivo temporário ANTES de importar o app
-# (app.py chama init_db() no import).
-_TMP_DB = Path(__file__).parent / f"_test_{uuid.uuid4().hex}.db"
-database.DB_PATH = str(_TMP_DB)
-
 import app as app_module  # noqa: E402
 from app import app  # noqa: E402
 
@@ -35,12 +29,8 @@ SENHA = "s3nh4-forte"
 
 @pytest.fixture()
 def banco():
-    """Banco limpo por teste (reafirma DB_PATH: outro módulo pode tê-lo trocado)."""
-    database.DB_PATH = str(_TMP_DB)
-    _TMP_DB.unlink(missing_ok=True)
-    database.init_db()
+    """Banco limpo por teste (o reset em si é da fixture autouse do conftest)."""
     yield
-    _TMP_DB.unlink(missing_ok=True)
 
 
 def _signup(c, nome_loja=LOJA, nome="Dona da Loja", login="dona", senha=SENHA):
@@ -58,7 +48,7 @@ def _login(c, nome_loja=LOJA, login="dona", senha=SENHA):
 
 def _aprovar_loja(codigo=LOJA):
     conn = database.get_conn()
-    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=?", (codigo,))
+    conn.execute("UPDATE lojas SET status='aprovado' WHERE codigo=%s", (codigo,))
     conn.commit()
     conn.close()
 
@@ -69,9 +59,9 @@ def test_signup_cria_loja_pendente_e_usuario_admin(banco):
     assert resp.status_code == 201
 
     conn = database.get_conn()
-    loja = conn.execute("SELECT status FROM lojas WHERE codigo=?", (LOJA,)).fetchone()
+    loja = conn.execute("SELECT status FROM lojas WHERE codigo=%s", (LOJA,)).fetchone()
     usuario = conn.execute(
-        "SELECT nome, login, papel, taxa_comissao, ativo FROM usuarios WHERE loja=?",
+        "SELECT nome, login, papel, taxa_comissao, ativo FROM usuarios WHERE loja=%s",
         (LOJA,),
     ).fetchone()
     conn.close()
@@ -125,7 +115,7 @@ def test_login_usuario_inativo_retorna_401(banco):
     _signup(c)
     _aprovar_loja()
     conn = database.get_conn()
-    conn.execute("UPDATE usuarios SET ativo=0 WHERE loja=? AND login='dona'", (LOJA,))
+    conn.execute("UPDATE usuarios SET ativo=0 WHERE loja=%s AND login='dona'", (LOJA,))
     conn.commit()
     conn.close()
     resp = _login(c)
@@ -136,7 +126,7 @@ def test_login_usuario_inativo_retorna_401(banco):
 def _criar_operador(login="operador", senha=SENHA):
     conn = database.get_conn()
     conn.execute(
-        "INSERT INTO usuarios (loja, nome, login, senha_hash, papel) VALUES (?, 'Operador', ?, ?, 'operador')",
+        "INSERT INTO usuarios (loja, nome, login, senha_hash, papel) VALUES (%s, 'Operador', %s, %s, 'operador')",
         (LOJA, login, generate_password_hash(senha)),
     )
     conn.commit()
@@ -168,6 +158,6 @@ def test_admin_consegue_salvar_pix(banco):
     assert resp.status_code == 200
 
     conn = database.get_conn()
-    pix = conn.execute("SELECT pix_chave FROM lojas WHERE codigo=?", (LOJA,)).fetchone()
+    pix = conn.execute("SELECT pix_chave FROM lojas WHERE codigo=%s", (LOJA,)).fetchone()
     conn.close()
     assert pix["pix_chave"] == "chave@pix"
