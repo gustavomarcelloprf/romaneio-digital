@@ -13,6 +13,8 @@
         me: null,
         permissoes: {},
         periodo: "30d",
+        saidasAberto: false,
+        recorrentes: [],
         view: null
     };
 
@@ -64,7 +66,7 @@
         else if (id === "estoque") loadStock();
         else if (id === "dashboard" || id === "minhas-vendas") loadRelatorios();
         else if (id === "equipe") loadUsuarios();
-        else if (id === "despesas") loadDespesas();
+        else if (id === "despesas") { loadDespesas(); loadRecorrentes(); }
     }
 
     function irPara(id, { atualizarHash = true } = {}) {
@@ -315,6 +317,33 @@
             </table>`;
     }
 
+    // Saídas = despesas + comissões. O card é um botão que abre/fecha o
+    // detalhe; o estado aberto sobrevive à troca de período.
+    function saidasCard(total) {
+        const aberto = state.saidasAberto;
+        return `<button type="button" class="stat-card" id="saidasCardBtn" aria-expanded="${aberto ? 'true' : 'false'}" aria-controls="dashSaidasDetalhe">
+            <span class="stat-label">Saídas ${aberto ? '▾' : '▸'}</span>
+            <span class="stat-value">${esc(fmtBRL(total))}</span>
+            <span class="stat-hint">despesas + comissões</span></button>`;
+    }
+
+    function renderSaidasDetalhe(detalhe) {
+        const wrap = $("#dashSaidasDetalhe");
+        if (!wrap) return;
+        if (!detalhe) { wrap.hidden = true; wrap.innerHTML = ''; return; }
+        wrap.hidden = !state.saidasAberto;
+        wrap.innerHTML = `
+            <table class="table">
+                <thead><tr><th>Saída</th><th>Valor</th></tr></thead>
+                <tbody>${detalhe.map((s, i) => `
+                    <tr${i === detalhe.length - 1 ? ' class="linha-comissao"' : ''}>
+                        <td>${esc(s.categoria)}</td>
+                        <td>${esc(fmtBRL(s.valor))}</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>`;
+    }
+
     function renderDashboardLoja(rel) {
         // Comissão é o que a loja tem A PAGAR, e só o dono (admin) vê esse
         // número: o backend simplesmente não manda o campo para o gerente.
@@ -328,9 +357,10 @@
                 statCard("Pedidos", rel.num_pedidos) +
                 statCard("Ticket médio", fmtBRL(rel.ticket_medio)) +
                 (veComissoes ? statCard("Comissões a pagar", fmtBRL(rel.comissoes_a_pagar)) : '') +
-                (veLucro ? statCard("Despesas", fmtBRL(rel.despesas_total)) : '') +
+                (veLucro ? saidasCard(rel.saidas_total) : '') +
                 (veLucro ? statCard("Lucro", fmtBRL(rel.lucro), rel.lucro < 0 ? 'is-negativo' : '') : '');
         }
+        renderSaidasDetalhe(veLucro ? (rel.saidas_detalhe || []) : null);
         const opWrap = $("#dashOperadoresWrap");
         if (opWrap) {
             const ops = rel.por_operador || [];
@@ -442,7 +472,10 @@
         if (!pode("despesas_gerir")) return;
         try {
             const res = await jfetch(`/api/despesas?${periodoQuery()}`);
-            if (res) renderDespesas(res);
+            if (res) {
+                renderDespesas(res);
+                atualizarCategoriasDespesa((res.por_categoria || []).map(c => c.categoria));
+            }
         } catch (err) {
             const wrap = $("#despesasWrap");
             if (wrap) wrap.innerHTML = `<p class="msg erro">Erro ao carregar despesas: ${esc(err.message)}</p>`;
@@ -458,6 +491,93 @@
             `${esc(res.importadas)} despesa(s) importada(s), total ${esc(fmtBRL(res.total))}.` +
             (erros.length ? ` ${esc(erros.length)} linha(s) com erro:
                 <ul class="import-erros">${erros.map(e => `<li>Linha ${esc(e.linha)}: ${esc(e.erro)}</li>`).join('')}</ul>` : '');
+    }
+
+    // Sugestões de categoria para os campos de texto livre: as já usadas nas
+    // despesas do período e nos modelos recorrentes.
+    function atualizarCategoriasDespesa(cats) {
+        const dl = $("#despesasCategorias");
+        if (!dl) return;
+        const todas = new Set([...(dl.dataset.cats ? JSON.parse(dl.dataset.cats) : []), ...cats.filter(Boolean)]);
+        dl.dataset.cats = JSON.stringify([...todas]);
+        dl.innerHTML = [...todas].sort().map(c => `<option value="${esc(c)}"></option>`).join('');
+    }
+
+    // --- Gastos recorrentes (modelos lançados mês a mês) ---
+    function renderRecorrentes(lista) {
+        const wrap = $("#recorrentesWrap");
+        if (!wrap) return;
+        wrap.innerHTML = lista.length ? `
+            <table class="table">
+                <thead><tr><th>Nome</th><th>Categoria</th><th>Status</th><th>Ações</th></tr></thead>
+                <tbody>${lista.map(r => `
+                    <tr>
+                        <td>${esc(r.nome)}</td>
+                        <td>${esc(r.categoria)}</td>
+                        <td>${r.ativo ? 'Ativo' : '<span class="muted">Inativo</span>'}</td>
+                        <td class="actions">
+                            <button type="button" class="btn-secondary btn-sm edit-recorrente-btn" data-id="${esc(r.id)}">Editar</button>
+                            <button type="button" class="btn-secondary btn-sm toggle-recorrente-btn ${r.ativo ? 'btn-danger' : ''}" data-id="${esc(r.id)}" data-ativo="${r.ativo ? 1 : 0}">${r.ativo ? 'Desativar' : 'Ativar'}</button>
+                        </td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>` : '<p class="muted" style="padding:12px;">Nenhum gasto recorrente cadastrado.</p>';
+        const btn = $("#btnLancarMes");
+        if (btn) btn.disabled = !lista.some(r => r.ativo);
+    }
+
+    async function loadRecorrentes() {
+        if (!pode("despesas_gerir")) return;
+        try {
+            const lista = await jfetch("/api/despesas/recorrentes");
+            if (!Array.isArray(lista)) return;
+            state.recorrentes = lista;
+            renderRecorrentes(lista);
+            atualizarCategoriasDespesa(lista.map(r => r.categoria));
+        } catch (err) {
+            const wrap = $("#recorrentesWrap");
+            if (wrap) wrap.innerHTML = `<p class="msg erro">Erro ao carregar gastos recorrentes: ${esc(err.message)}</p>`;
+        }
+    }
+
+    // Abre a lista do mês já preenchida: nome/categoria fixos, valor sugerido
+    // (último lançamento do modelo) editável antes de confirmar.
+    async function abrirLancarMes() {
+        const form = $("#formLancarMes");
+        const wrap = $("#lancarMesWrap");
+        const msg = $("#lancarMesMsg");
+        if (!form || !wrap) return;
+        msg.className = "msg"; msg.textContent = "";
+        try {
+            const sugestao = await jfetch("/api/despesas/recorrentes/sugestao");
+            if (!Array.isArray(sugestao)) return;
+            $("#lancarMesData").value = isoDate(new Date());
+            wrap.innerHTML = sugestao.length ? `
+                <table class="table">
+                    <thead><tr><th>Lançar</th><th>Nome</th><th>Categoria</th><th>Valor (R$)</th></tr></thead>
+                    <tbody>${sugestao.map(s => `
+                        <tr data-recorrente-id="${esc(s.id)}">
+                            <td><input type="checkbox" class="lancar-incluir" checked aria-label="Lançar ${esc(s.nome)}"></td>
+                            <td>${esc(s.nome)}</td>
+                            <td>${esc(s.categoria)}</td>
+                            <td><input class="lancar-valor" inputmode="decimal" placeholder="0,00" value="${s.valor_sugerido ? esc(s.valor_sugerido.toFixed(2).replace('.', ',')) : ''}"></td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>` : '<p class="muted" style="padding:12px;">Nenhum gasto recorrente ativo.</p>';
+            form.hidden = false;
+            $("#btnLancarMes").hidden = true;
+        } catch (err) {
+            msg.className = "msg erro";
+            msg.textContent = `Erro: ${err.message}`;
+            form.hidden = false;
+        }
+    }
+
+    function fecharLancarMes() {
+        const form = $("#formLancarMes");
+        if (form) form.hidden = true;
+        const btn = $("#btnLancarMes");
+        if (btn) btn.hidden = false;
     }
 
     async function loadUsuarios() {
@@ -1054,6 +1174,125 @@
                 loadDespesas();
                 loadRelatorios();
             } catch (err) { alert(err.message); }
+        });
+
+        // Card "Saídas" do dashboard: expande/recolhe o detalhe por categoria.
+        $("#dashCards")?.addEventListener("click", e => {
+            const btn = e.target.closest("#saidasCardBtn");
+            if (!btn) return;
+            state.saidasAberto = !state.saidasAberto;
+            btn.setAttribute("aria-expanded", state.saidasAberto ? "true" : "false");
+            btn.querySelector(".stat-label").textContent = `Saídas ${state.saidasAberto ? '▾' : '▸'}`;
+            const det = $("#dashSaidasDetalhe");
+            if (det) det.hidden = !state.saidasAberto;
+        });
+
+        $("#formDespesaAvulsa")?.addEventListener("submit", async e => {
+            e.preventDefault();
+            const msg = $("#despesaAvulsaMsg");
+            const data = Object.fromEntries(new FormData(e.target).entries());
+            const valor = ptbrToNumber(data.valor);
+            if (!valor || valor <= 0) {
+                msg.className = "msg erro";
+                msg.textContent = "Informe um valor maior que zero.";
+                return;
+            }
+            try {
+                const res = await jfetch("/api/despesas", { method: "POST", body: JSON.stringify(data) });
+                msg.className = "msg ok";
+                msg.textContent = `Despesa de ${fmtBRL(res.valor)} adicionada.`;
+                e.target.reset();
+                loadDespesas();
+                loadRelatorios();
+            } catch (err) {
+                msg.className = "msg erro";
+                msg.textContent = `Erro: ${err.message}`;
+            }
+        });
+
+        $("#formRecorrente")?.addEventListener("submit", async e => {
+            e.preventDefault();
+            const msg = $("#recorrentesMsg");
+            try {
+                await jfetch("/api/despesas/recorrentes", {
+                    method: "POST",
+                    body: JSON.stringify(Object.fromEntries(new FormData(e.target).entries())),
+                });
+                msg.className = "msg"; msg.textContent = "";
+                e.target.reset();
+                loadRecorrentes();
+            } catch (err) {
+                msg.className = "msg erro";
+                msg.textContent = `Erro: ${err.message}`;
+            }
+        });
+
+        $("#recorrentesWrap")?.addEventListener("click", async e => {
+            const edit = e.target.closest(".edit-recorrente-btn");
+            const toggle = e.target.closest(".toggle-recorrente-btn");
+            if (!edit && !toggle) return;
+            const id = (edit || toggle).dataset.id;
+            let body;
+            if (edit) {
+                const r = state.recorrentes.find(x => String(x.id) === id);
+                if (!r) return;
+                const nome = prompt("Nome do gasto recorrente:", r.nome);
+                if (nome === null) return;
+                const categoria = prompt("Categoria:", r.categoria);
+                if (categoria === null) return;
+                body = { nome, categoria };
+            } else {
+                body = { ativo: toggle.dataset.ativo !== "1" };
+            }
+            try {
+                await jfetch(`/api/despesas/recorrentes/${id}`, { method: "PUT", body: JSON.stringify(body) });
+                loadRecorrentes();
+                fecharLancarMes();
+            } catch (err) { alert(err.message); }
+        });
+
+        $("#btnLancarMes")?.addEventListener("click", abrirLancarMes);
+        $("#btnCancelarLancarMes")?.addEventListener("click", fecharLancarMes);
+
+        $("#formLancarMes")?.addEventListener("submit", async e => {
+            e.preventDefault();
+            const msg = $("#lancarMesMsg");
+            const linhas = [...document.querySelectorAll("#lancarMesWrap tr[data-recorrente-id]")]
+                .filter(tr => tr.querySelector(".lancar-incluir")?.checked);
+            if (!linhas.length) {
+                msg.className = "msg erro";
+                msg.textContent = "Marque ao menos um gasto para lançar.";
+                return;
+            }
+            const semValor = linhas.filter(tr => !(ptbrToNumber(tr.querySelector(".lancar-valor").value) > 0));
+            if (semValor.length) {
+                msg.className = "msg erro";
+                msg.textContent = "Informe um valor maior que zero em todos os gastos marcados (ou desmarque-os).";
+                semValor[0].querySelector(".lancar-valor").focus();
+                return;
+            }
+            const itens = linhas.map(tr => ({
+                recorrente_id: Number(tr.dataset.recorrenteId),
+                valor: tr.querySelector(".lancar-valor").value,
+            }));
+            try {
+                const res = await jfetch("/api/despesas/lancar-mes", {
+                    method: "POST",
+                    body: JSON.stringify({ data: $("#lancarMesData").value, itens }),
+                });
+                const erros = res.erros || [];
+                const out = $("#recorrentesMsg");
+                out.className = `msg ${erros.length ? 'erro' : 'ok'}`;
+                out.innerHTML =
+                    `${esc(res.lancadas)} gasto(s) lançado(s), total ${esc(fmtBRL(res.total))}.` +
+                    (erros.length ? `<ul class="import-erros">${erros.map(er => `<li>Linha ${esc(er.linha)}: ${esc(er.erro)}</li>`).join('')}</ul>` : '');
+                fecharLancarMes();
+                loadDespesas();
+                loadRelatorios();
+            } catch (err) {
+                msg.className = "msg erro";
+                msg.textContent = `Erro: ${err.message}`;
+            }
         });
 
         logoutBtn?.addEventListener("click", async () => {

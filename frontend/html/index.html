@@ -107,6 +107,7 @@
                         <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
                     </div>
                     <div id="dashCards" class="dash-cards"></div>
+                    <div id="dashSaidasDetalhe" class="saidas-detalhe table-responsive" hidden></div>
                     <h3>Por operador</h3>
                     <div id="dashOperadoresWrap" class="table-responsive"></div>
                     <h3>Tecidos mais vendidos</h3>
@@ -256,6 +257,48 @@
                 <!-- ====== Tela: Despesas (somente admin: é dinheiro do dono) ====== -->
                 <section class="view card" id="view-despesas" hidden>
                     <h2>Despesas</h2>
+                    <form id="formDespesaAvulsa">
+                        <h3>Adicionar despesa</h3>
+                        <div class="grid">
+                            <div class="form-group"><label>Data *<input name="data" type="date" required></label></div>
+                            <div class="form-group"><label>Descrição<input name="descricao" placeholder="Ex.: Conserto da máquina"></label></div>
+                            <div class="form-group"><label>Categoria<input name="categoria" list="despesasCategorias" placeholder="Ex.: Manutenção"></label></div>
+                            <div class="form-group"><label>Valor (R$) *<input name="valor" inputmode="decimal" placeholder="Ex.: 150,00" required></label></div>
+                            <button type="submit" class="btn-primary" style="grid-column: 1 / -1;">Adicionar despesa</button>
+                        </div>
+                        <div id="despesaAvulsaMsg" class="msg"></div>
+                    </form>
+                    <datalist id="despesasCategorias"></datalist>
+                    <hr class="divider">
+
+                    <!-- Gastos recorrentes: modelos (nome + categoria, sem valor
+                         fixo) lançados mês a mês com o valor ajustado na hora. -->
+                    <div id="recorrentesArea">
+                        <h3>Gastos recorrentes</h3>
+                        <p class="muted">Aluguel, luz, salários (ex.: "Salário Maria" na categoria "Salários")... O valor é digitado a cada mês, sugerido pelo último lançamento.</p>
+                        <form id="formRecorrente" class="item-row">
+                            <input name="nome" required placeholder="Nome (ex.: Aluguel)">
+                            <input name="categoria" list="despesasCategorias" placeholder="Categoria (ex.: Imóvel)">
+                            <button type="submit" class="btn-primary" style="width: auto;">Adicionar modelo</button>
+                        </form>
+                        <div id="recorrentesMsg" class="msg"></div>
+                        <div id="recorrentesWrap" class="table-responsive"></div>
+                        <button type="button" id="btnLancarMes" class="btn-primary" style="width: auto;">Lançar gastos do mês</button>
+                        <form id="formLancarMes" hidden>
+                            <h3>Lançar gastos do mês</h3>
+                            <div class="item-row">
+                                <label>Data do lançamento <input id="lancarMesData" type="date" required></label>
+                            </div>
+                            <div id="lancarMesWrap" class="table-responsive recorrentes-lancar"></div>
+                            <div class="item-row">
+                                <button type="submit" class="btn-primary" style="width: auto;">Confirmar lançamento</button>
+                                <button type="button" id="btnCancelarLancarMes" class="btn-secondary" style="width: auto;">Cancelar</button>
+                            </div>
+                            <div id="lancarMesMsg" class="msg"></div>
+                        </form>
+                    </div>
+                    <hr class="divider">
+
                     <form id="formImportarDespesas">
                         <h3>Importar planilha</h3>
                         <p class="muted">Arquivo .xlsx ou .csv com as colunas <strong>data</strong>, <strong>descricao</strong>, <strong>categoria</strong> e <strong>valor</strong> (a categoria é livre).</p>
