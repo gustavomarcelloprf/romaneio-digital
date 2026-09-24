@@ -7,7 +7,8 @@
     const state = {
         novoPedido: { itens: [] },
         pedidoEmEdicao: { id: null, itens: [] },
-        entrada: { linhas: [] },
+        entrada: { linhas: [], encomendaId: null },
+        novaEncomenda: { itens: [] },
         loja: sessionStorage.getItem("loja_codigo") || "",
         me: null,
         permissoes: {},
@@ -249,8 +250,10 @@
         // o estoque (o backend recusa o resto com 403).
         $("#formAddTecido")?.toggleAttribute("hidden", !pode("estoque_mutar"));
         $("#entradaMercadoria")?.toggleAttribute("hidden", !pode("estoque_mutar"));
+        $("#encomendasWrap")?.toggleAttribute("hidden", !pode("estoque_mutar"));
 
         if (pode("usuarios_gerir")) await loadUsuarios();
+        if (pode("estoque_mutar")) await loadEncomendas();
     }
 
     // --- Dashboards (Fase 1) ---
@@ -544,9 +547,132 @@
             // Sugestões de tecido na entrada: o backend recusa tecido não cadastrado.
             const dl = $("#entradaTecidos");
             if (dl) dl.innerHTML = estoque.map(t => `<option value="${esc(t.nome_tecido)}">`).join('');
+            const dlEnc = $("#encTecidos");
+            if (dlEnc) dlEnc.innerHTML = estoque.map(t => `<option value="${esc(t.nome_tecido)}">`).join('');
         } catch (err) {
             $("#estoqueWrap").innerHTML = `<p class="msg erro">Erro ao carregar estoque: ${esc(err.message)}</p>`;
         }
+    }
+
+    // ===== Encomendas (previsto) =====
+    // O previsto nunca credita o estoque; "Receber" carrega o previsto na
+    // entrada abaixo (mesmo mecanismo/endpoint de crédito), com o item_id de
+    // cada linha preservado para o backend calcular a variação.
+    function linhaEncomendaVazia() {
+        return { tecido: "", cor: "", peso_previsto: "", rolos_previstos: "" };
+    }
+
+    function renderEncomendaItens() {
+        const tbody = $("#encItensLinhas");
+        if (!tbody) return;
+        const itens = state.novaEncomenda.itens;
+        tbody.innerHTML = itens.length ? itens.map((it, i) => `
+            <tr data-index="${i}">
+                <td><input data-campo="tecido" list="encTecidos" value="${esc(it.tecido)}" placeholder="Tecido"></td>
+                <td><input data-campo="cor" value="${esc(it.cor)}" placeholder="Cor"></td>
+                <td><input data-campo="peso_previsto" inputmode="decimal" value="${esc(it.peso_previsto)}" placeholder="0,000"></td>
+                <td><input data-campo="rolos_previstos" inputmode="numeric" value="${esc(it.rolos_previstos)}" placeholder="Opcional"></td>
+                <td><button type="button" class="btn-secondary btn-danger btn-sm remove-enc-linha">X</button></td>
+            </tr>
+        `).join('') : `<tr><td colspan="5" class="muted" style="text-align:center;">Nenhum item. Adicione o que está previsto chegar.</td></tr>`;
+    }
+
+    function msgEncomenda(html) {
+        const el = $("#encomendaMsg");
+        if (el) el.innerHTML = html;
+    }
+
+    async function criarEncomenda() {
+        const itens = state.novaEncomenda.itens.filter(it => it.tecido || it.cor || it.peso_previsto || it.rolos_previstos);
+        if (!itens.length) return msgEncomenda(`<p class="msg erro">Adicione ao menos um item previsto.</p>`);
+        try {
+            await jfetch("/api/encomendas", {
+                method: "POST",
+                body: JSON.stringify({
+                    fornecedor: $("#encFornecedor")?.value.trim() || "",
+                    data_prevista: $("#encDataPrevista")?.value || "",
+                    itens: itens.map(it => ({
+                        tecido: it.tecido, cor: it.cor,
+                        peso_previsto: it.peso_previsto,
+                        rolos_previstos: it.rolos_previstos || null,
+                    })),
+                }),
+            });
+            state.novaEncomenda.itens = [linhaEncomendaVazia()];
+            renderEncomendaItens();
+            if ($("#encFornecedor")) $("#encFornecedor").value = "";
+            if ($("#encDataPrevista")) $("#encDataPrevista").value = "";
+            msgEncomenda(`<p class="msg">Encomenda criada.</p>`);
+            loadEncomendas();
+        } catch (err) {
+            msgEncomenda(`<p class="msg erro">Erro ao criar encomenda: ${esc(err.message)}</p>`);
+        }
+    }
+
+    function renderEncomendasLista(lista) {
+        const tbody = $("#encomendasLista");
+        if (!tbody) return;
+        tbody.innerHTML = lista.length ? lista.map(e => `
+            <tr>
+                <td>#${esc(e.id)}</td>
+                <td>${esc(e.fornecedor || '-')}</td>
+                <td>${esc(e.data_prevista || '-')}</td>
+                <td>${esc(e.status)}</td>
+                <td class="actions">${e.status === 'aberta'
+                    ? `<button type="button" class="btn-secondary btn-sm receber-encomenda-btn" data-id="${e.id}">Receber</button>`
+                    : ''}</td>
+            </tr>
+        `).join('') : `<tr><td colspan="5" class="muted" style="text-align:center;">Nenhuma encomenda.</td></tr>`;
+    }
+
+    async function loadEncomendas() {
+        try {
+            const lista = await jfetch("/api/encomendas");
+            if (Array.isArray(lista)) renderEncomendasLista(lista);
+        } catch (err) {
+            msgEncomenda(`<p class="msg erro">Erro ao carregar encomendas: ${esc(err.message)}</p>`);
+        }
+    }
+
+    // Carrega o previsto da encomenda na entrada, um item por linha, mantendo
+    // o item_id de cada um para o backend calcular a variação ao confirmar.
+    async function iniciarRecebimento(encomendaId) {
+        try {
+            const encomenda = await jfetch(`/api/encomendas/${encomendaId}`);
+            state.entrada.encomendaId = encomendaId;
+            state.entrada.linhas = encomenda.itens.map(it => ({
+                item_id: it.id, tecido: it.tecido, cor: it.cor,
+                peso: numberToPtbr(it.peso_previsto), id_rolo: "",
+            }));
+            renderEntrada();
+            if ($("#entradaFornecedor")) $("#entradaFornecedor").value = encomenda.fornecedor || "";
+            if ($("#entradaData") && !$("#entradaData").value) {
+                const d = new Date();
+                $("#entradaData").value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            }
+            const titulo = $("#entradaTitulo");
+            if (titulo) titulo.textContent = `Recebendo encomenda #${encomendaId} — ajuste ao peso real`;
+            const btnConfirmar = $("#btnConfirmarEntrada");
+            if (btnConfirmar) btnConfirmar.textContent = "Confirmar recebimento";
+            $("#btnCancelarRecebimento")?.removeAttribute("hidden");
+            msgEntrada("");
+            $("#entradaMercadoria")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        } catch (err) {
+            msgEncomenda(`<p class="msg erro">Erro ao abrir a encomenda: ${esc(err.message)}</p>`);
+        }
+    }
+
+    function cancelarRecebimento() {
+        state.entrada.encomendaId = null;
+        state.entrada.linhas = [linhaEntradaVazia()];
+        renderEntrada();
+        if ($("#entradaFornecedor")) $("#entradaFornecedor").value = "";
+        const titulo = $("#entradaTitulo");
+        if (titulo) titulo.textContent = "Entrada de mercadoria";
+        const btnConfirmar = $("#btnConfirmarEntrada");
+        if (btnConfirmar) btnConfirmar.textContent = "Confirmar entrada";
+        $("#btnCancelarRecebimento")?.setAttribute("hidden", "");
+        msgEntrada("");
     }
 
     // ===== Entrada de mercadoria (lote digitado ou planilha) =====
@@ -633,37 +759,51 @@
         }
     }
 
+    function listaVariacaoEncomenda(variacao) {
+        if (!variacao || !variacao.length) return "";
+        return `<ul>${variacao.map(v => {
+            const sinal = v.variacao > 0 ? '+' : '';
+            return `<li>${esc(v.tecido)} / ${esc(v.cor)}: previsto ${esc(numberToPtbr(v.peso_previsto))} kg, recebido ${esc(numberToPtbr(v.peso_recebido))} kg (${sinal}${esc(numberToPtbr(v.variacao))} kg)</li>`;
+        }).join('')}</ul>`;
+    }
+
     async function confirmarEntrada() {
         const linhas = state.entrada.linhas.filter(l => l.tecido || l.cor || l.peso || l.id_rolo);
         if (!linhas.length) return msgEntrada(`<p class="msg erro">Adicione ao menos uma linha.</p>`);
         const kg = linhas.reduce((acc, l) => acc + (pesoEntrada(l.peso) || 0), 0);
-        if (!confirm(`Confirmar entrada de ${linhas.length} linha(s), total ${numberToPtbr(Math.round(kg * 1000) / 1000)} kg?`)) return;
+        const encomendaId = state.entrada.encomendaId;
+        const rotulo = encomendaId ? "recebimento" : "entrada";
+        if (!confirm(`Confirmar ${rotulo} de ${linhas.length} linha(s), total ${numberToPtbr(Math.round(kg * 1000) / 1000)} kg?`)) return;
         const btn = $("#btnConfirmarEntrada");
         if (btn) btn.disabled = true;
         try {
-            const r = await fetchEntrada("/api/estoque/entradas", {
+            const url = encomendaId ? `/api/encomendas/${encomendaId}/receber` : "/api/estoque/entradas";
+            const r = await fetchEntrada(url, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     fornecedor: $("#entradaFornecedor")?.value.trim() || "",
                     data: $("#entradaData")?.value || "",
-                    linhas: linhas.map(l => ({ tecido: l.tecido, cor: l.cor, peso: l.peso, id_rolo: l.id_rolo || null })),
+                    linhas: linhas.map(l => ({
+                        item_id: l.item_id ?? null, tecido: l.tecido, cor: l.cor,
+                        peso: l.peso, id_rolo: l.id_rolo || null,
+                    })),
                 }),
             });
             if (!r) return;
             if (!r.ok) {
                 return msgEntrada(`<p class="msg erro">${esc(r.json.error || `Erro HTTP ${r.status}`)}</p>${listaErrosEntrada(r.json.erros)}`);
             }
-            const { linhas: n, peso_total, cores_criadas } = r.json;
-            state.entrada.linhas = [linhaEntradaVazia()];
-            renderEntrada();
+            const { linhas: n, peso_total, cores_criadas, variacao } = r.json;
+            cancelarRecebimento();
             if ($("#entradaArquivo")) $("#entradaArquivo").value = "";
-            if ($("#entradaFornecedor")) $("#entradaFornecedor").value = "";
             msgEntrada(
-                `<p class="msg">Entrada registrada: ${esc(n)} linha(s), ${esc(numberToPtbr(peso_total))} kg.</p>` +
-                (cores_criadas.length ? `<p class="muted">Cores novas: ${cores_criadas.map(c => `${esc(c.tecido)} / ${esc(c.cor)}`).join(', ')}</p>` : "")
+                `<p class="msg">${encomendaId ? 'Recebimento' : 'Entrada'} registrado: ${esc(n)} linha(s), ${esc(numberToPtbr(peso_total))} kg.</p>` +
+                (cores_criadas.length ? `<p class="muted">Cores novas: ${cores_criadas.map(c => `${esc(c.tecido)} / ${esc(c.cor)}`).join(', ')}</p>` : "") +
+                listaVariacaoEncomenda(variacao)
             );
             loadStock();
+            if (encomendaId) loadEncomendas();
         } catch (err) {
             msgEntrada(`<p class="msg erro">Erro ao registrar entrada: ${esc(err.message)}</p>`);
         } finally {
@@ -1047,6 +1187,39 @@
             }
         });
 
+        // ===== Encomendas (previsto) =====
+        if ($("#encomendasWrap")) {
+            state.novaEncomenda.itens = [linhaEncomendaVazia()];
+            renderEncomendaItens();
+
+            $("#btnEncAddLinha")?.addEventListener('click', () => {
+                state.novaEncomenda.itens.push(linhaEncomendaVazia());
+                renderEncomendaItens();
+                $("#encItensLinhas tr:last-child input")?.focus();
+            });
+            $("#encItensLinhas")?.addEventListener('input', e => {
+                const campo = e.target.dataset.campo;
+                const tr = e.target.closest('tr[data-index]');
+                if (!campo || !tr) return;
+                state.novaEncomenda.itens[parseInt(tr.dataset.index, 10)][campo] = e.target.value;
+            });
+            $("#encItensLinhas")?.addEventListener('click', e => {
+                if (!e.target.classList.contains('remove-enc-linha')) return;
+                const tr = e.target.closest('tr[data-index]');
+                state.novaEncomenda.itens.splice(parseInt(tr.dataset.index, 10), 1);
+                renderEncomendaItens();
+            });
+            $("#formNovaEncomenda")?.addEventListener('submit', e => {
+                e.preventDefault();
+                criarEncomenda();
+            });
+            $("#encomendasLista")?.addEventListener('click', e => {
+                const btn = e.target.closest('.receber-encomenda-btn');
+                if (!btn) return;
+                iniciarRecebimento(parseInt(btn.dataset.id, 10));
+            });
+        }
+
         // ===== Entrada de mercadoria =====
         if ($("#entradaMercadoria")) {
             const entradaData = $("#entradaData");
@@ -1078,6 +1251,7 @@
             });
             $("#btnLerPlanilha")?.addEventListener('click', lerPlanilhaEntrada);
             $("#btnConfirmarEntrada")?.addEventListener('click', confirmarEntrada);
+            $("#btnCancelarRecebimento")?.addEventListener('click', cancelarRecebimento);
         }
 
         // ===== Event Listeners do Estoque =====

@@ -133,11 +133,44 @@
                         </div>
                         <hr class="divider">
                     </form>
+                    <!-- Encomendas (previsto): só gerente/admin. Criar não mexe no
+                         estoque; "Receber" carrega o previsto na entrada abaixo
+                         para o operador ajustar ao peso real e confirmar. -->
+                    <div id="encomendasWrap" hidden>
+                        <h3>Encomendas</h3>
+                        <p class="muted">O previsto não credita o estoque. Ao receber, os pesos reais (que podem diferir do previsto) creditam o estoque como uma entrada.</p>
+                        <form id="formNovaEncomenda">
+                            <div class="item-row">
+                                <input id="encFornecedor" placeholder="Fornecedor (opcional)">
+                                <input id="encDataPrevista" type="date">
+                            </div>
+                            <datalist id="encTecidos"></datalist>
+                            <div class="table-responsive">
+                                <table class="table">
+                                    <thead><tr><th>Tecido</th><th>Cor</th><th>Peso previsto (kg)</th><th>Rolos previstos</th><th></th></tr></thead>
+                                    <tbody id="encItensLinhas"></tbody>
+                                </table>
+                            </div>
+                            <div class="item-row">
+                                <button type="button" id="btnEncAddLinha" class="btn-secondary btn-sm" style="width:auto;">+ Adicionar item</button>
+                                <button type="submit" class="btn-primary btn-sm" style="width:auto;">Criar encomenda</button>
+                            </div>
+                        </form>
+                        <div id="encomendaMsg"></div>
+                        <div class="table-responsive">
+                            <table class="table">
+                                <thead><tr><th>#</th><th>Fornecedor</th><th>Previsão</th><th>Status</th><th></th></tr></thead>
+                                <tbody id="encomendasLista"></tbody>
+                            </table>
+                        </div>
+                        <hr class="divider">
+                    </div>
                     <!-- Entrada de mercadoria (recebimento): só gerente/admin.
                          A planilha só preenche a tabela abaixo; nada é gravado
                          até o "Confirmar entrada". -->
                     <div id="entradaMercadoria" hidden>
-                        <h3>Entrada de mercadoria</h3>
+                        <h3 id="entradaTitulo">Entrada de mercadoria</h3>
+                        <button type="button" id="btnCancelarRecebimento" class="btn-secondary btn-sm" style="width:auto;" hidden>Cancelar recebimento</button>
                         <div class="item-row">
                             <input id="entradaFornecedor" placeholder="Fornecedor (opcional)">
                             <input id="entradaData" type="date">
