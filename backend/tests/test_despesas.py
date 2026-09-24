@@ -83,10 +83,13 @@ def ctx():
     database.init_db()
 
     admin = _signup_loja_aprovada(LOJA)
-    assert admin.post(
+    resp = admin.post(
         "/usuarios",
-        json={"nome": "Operador", "login": "operador", "senha": SENHA, "taxa_comissao": "0"},
-    ).status_code == 201
+        json={"nome": "Operador", "login": "operador", "taxa_comissao": "0"},
+    )
+    assert resp.status_code == 201
+    aceite = app.test_client().post(resp.get_json()["convite_path"], json={"senha": SENHA})
+    assert aceite.status_code == 200
 
     conn = database.get_conn()
     # Não há UI para criar gerente: o papel nasce direto no banco.

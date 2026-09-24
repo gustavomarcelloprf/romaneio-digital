@@ -6,7 +6,8 @@ import csv
 import hmac
 import unicodedata
 import functools
-from datetime import date, datetime, timedelta
+import secrets
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import sys
@@ -79,6 +80,8 @@ PERMISSOES = {
     # quanto tem de comissão a PAGAR.
     "relatorio_loja":      ("gerente", "admin"),
     "relatorio_comissoes": ("admin",),
+    # Despesas (importar/listar/remover): dinheiro que sai do bolso do dono.
+    "despesas_gerir":      ("admin",),
     # Gestão de gente e configuração da loja: dono apenas.
     "usuarios_gerir":      ("admin",),
     "config_editar":       ("admin",),
@@ -212,6 +215,8 @@ def auth_login():
     if (
         loja_db and loja_db.get("status") == "aprovado"
         and usuario and usuario.get("ativo")
+        # Operador com convite ainda não aceito não tem senha: não loga.
+        and usuario.get("senha_hash")
         and check_password_hash(usuario["senha_hash"], senha)
     ):
         session["loja_codigo"] = loja_db["codigo"]
@@ -235,6 +240,77 @@ def index():
 @app.get("/acesso", endpoint="acesso_page")
 def acesso_page():
     return send_from_directory(HTML_DIR, "acesso.html")
+
+# -----------------------------------------------------------------------------
+# Convite de primeiro acesso (público, protegido só pelo token)
+# -----------------------------------------------------------------------------
+CONVITE_VALIDADE = timedelta(days=7)
+CONVITE_SENHA_MIN = 6
+
+
+def _agora_utc_str():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _novo_convite():
+    """(token, expira) para um convite novo."""
+    expira = (datetime.now(timezone.utc) + CONVITE_VALIDADE).strftime("%Y-%m-%d %H:%M:%S")
+    return secrets.token_urlsafe(32), expira
+
+
+def _usuario_do_convite(conn, token):
+    """Usuário dono do token, se o convite existe, não expirou e o usuário está ativo."""
+    if not token:
+        return None
+    return conn.execute(
+        "SELECT id, loja, nome, login FROM usuarios "
+        "WHERE convite_token = ? AND convite_expira > ? AND ativo = 1",
+        (token, _agora_utc_str()),
+    ).fetchone()
+
+
+@app.get("/convite/<token>")
+def convite_page(token):
+    conn = get_conn()
+    try:
+        usuario = _usuario_do_convite(conn, token)
+    finally:
+        conn.close()
+    if not usuario:
+        return render_template("convite.html", valido=False), 404
+    return render_template(
+        "convite.html", valido=True, nome=usuario["nome"],
+        login=usuario["login"], loja=usuario["loja"],
+    )
+
+
+@app.post("/convite/<token>")
+@limiter.limit("10 per minute")
+def convite_definir_senha(token):
+    data = request.get_json(silent=True) or {}
+    senha = (data.get("senha") or "").strip()
+    conn = get_conn()
+    try:
+        usuario = _usuario_do_convite(conn, token)
+        if not usuario:
+            return jsonify(error="Convite inválido ou expirado. Peça um novo link ao administrador."), 404
+        if len(senha) < CONVITE_SENHA_MIN:
+            return jsonify(error=f"A senha precisa ter pelo menos {CONVITE_SENHA_MIN} caracteres."), 400
+        # O WHERE repete o token: se dois envios correrem juntos, só um grava.
+        cur = conn.execute(
+            "UPDATE usuarios SET senha_hash = ?, convite_token = NULL, convite_expira = NULL "
+            "WHERE id = ? AND convite_token = ?",
+            (generate_password_hash(senha), usuario["id"], token),
+        )
+        if cur.rowcount != 1:
+            conn.rollback()
+            return jsonify(error="Convite inválido ou expirado. Peça um novo link ao administrador."), 404
+        conn.commit()
+        return jsonify(ok=True, loja=usuario["loja"], login=usuario["login"],
+                       message="Senha definida. Agora é só entrar.")
+    finally:
+        conn.close()
+
 
 @app.get("/admin", endpoint="admin_page")
 def admin_page():
@@ -336,7 +412,9 @@ def usuarios_api():
     conn = get_conn()
     if request.method == "GET":
         usuarios = [dict(r) for r in conn.execute(
-            "SELECT id, nome, login, papel, taxa_comissao, ativo FROM usuarios WHERE loja = ? ORDER BY nome ASC",
+            "SELECT id, nome, login, papel, taxa_comissao, ativo, "
+            "(senha_hash IS NULL) AS convite_pendente "
+            "FROM usuarios WHERE loja = ? ORDER BY nome ASC",
             (loja,)
         ).fetchall()]
         conn.close(); return jsonify(usuarios)
@@ -344,21 +422,29 @@ def usuarios_api():
         data = request.get_json(silent=True) or {}
         nome = (data.get("nome") or "").strip()
         login = (data.get("login") or "").strip()
-        senha = (data.get("senha") or "").strip()
         taxa = _ptbr_to_float(data.get("taxa_comissao"))
         if taxa is None: taxa = 0.0
-        if not nome or not login or not senha:
-            conn.close(); return jsonify(error="Nome, login e senha são obrigatórios."), 400
+        if not nome or not login:
+            conn.close(); return jsonify(error="Nome e login são obrigatórios."), 400
         if taxa < 0:
             conn.close(); return jsonify(error="Taxa de comissão não pode ser negativa."), 400
+        # O operador nasce SEM senha: quem a define é ele, pelo link do convite.
+        token, expira = _novo_convite()
         try:
             cur = conn.execute(
-                "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao, ativo) VALUES (?, ?, ?, ?, 'operador', ?, 1)",
-                (loja, nome, login, generate_password_hash(senha), taxa),
+                "INSERT INTO usuarios (loja, nome, login, senha_hash, papel, taxa_comissao, ativo, convite_token, convite_expira) "
+                "VALUES (?, ?, ?, NULL, 'operador', ?, 1, ?, ?)",
+                (loja, nome, login, taxa, token, expira),
             )
             new_id = cur.lastrowid
             conn.commit()
-            return jsonify(id=new_id, nome=nome, login=login, papel="operador", taxa_comissao=taxa), 201
+            convite_path = f"/convite/{token}"
+            return jsonify(
+                id=new_id, nome=nome, login=login, papel="operador", taxa_comissao=taxa,
+                convite_token=token, convite_path=convite_path,
+                convite_url=request.host_url.rstrip("/") + convite_path,
+                convite_expira=expira,
+            ), 201
         except sqlite3.IntegrityError:
             conn.rollback(); return jsonify(error=f"Já existe um usuário com o login '{login}' nesta loja."), 409
         finally: conn.close()
@@ -399,8 +485,10 @@ def usuario_update_api(usuario_id: int):
         )
         senha_nova = (data.get("senha") or "").strip()
         if senha_nova:
+            # Senha definida pelo admin substitui um convite pendente.
             conn.execute(
-                "UPDATE usuarios SET senha_hash = ? WHERE id = ? AND loja = ?",
+                "UPDATE usuarios SET senha_hash = ?, convite_token = NULL, convite_expira = NULL "
+                "WHERE id = ? AND loja = ?",
                 (generate_password_hash(senha_nova), usuario_id, loja),
             )
         conn.commit()
@@ -1112,9 +1200,7 @@ def relatorio_meu():
 # -----------------------------------------------------------------------------
 # API: Despesas (somente admin) — importação de planilha xlsx/csv
 # -----------------------------------------------------------------------------
-# Despesa é dinheiro que SAI do bolso do dono, a mesma natureza da comissão a
-# pagar: reaproveita a capacidade já existente em vez de criar uma nova.
-PERM_DESPESAS = "relatorio_comissoes"
+PERM_DESPESAS = "despesas_gerir"
 DESPESAS_MAX_BYTES = 5 * 1024 * 1024
 DESPESAS_MAX_LINHAS = 5000
 DESPESAS_COLUNAS = ("data", "descricao", "categoria", "valor")

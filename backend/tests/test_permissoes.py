@@ -71,9 +71,11 @@ def ctx():
     admin = _login("admin")
     resp = admin.post(
         "/usuarios",
-        json={"nome": "Operador Um", "login": "operador", "senha": SENHA, "taxa_comissao": "10"},
+        json={"nome": "Operador Um", "login": "operador", "taxa_comissao": "10"},
     )
     assert resp.status_code == 201
+    aceite = app.test_client().post(resp.get_json()["convite_path"], json={"senha": SENHA})
+    assert aceite.status_code == 200
 
     yield {
         "admin": admin,
@@ -113,7 +115,7 @@ def test_criacao_de_usuario_continua_gerando_operador(ctx):
     # Não há UI para criar gerente ainda: mesmo pedindo, sai operador.
     resp = ctx["admin"].post(
         "/usuarios",
-        json={"nome": "Outro", "login": "outro", "senha": SENHA, "papel": "gerente"},
+        json={"nome": "Outro", "login": "outro", "papel": "gerente"},
     )
     assert resp.status_code == 201
     assert resp.get_json()["papel"] == "operador"

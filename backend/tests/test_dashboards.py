@@ -94,10 +94,12 @@ def ctx():
 
     resp = admin.post(
         "/usuarios",
-        json={"nome": "Operador Um", "login": "operador", "senha": SENHA, "taxa_comissao": "10"},
+        json={"nome": "Operador Um", "login": "operador", "taxa_comissao": "10"},
     )
     assert resp.status_code == 201
     operador_id = resp.get_json()["id"]
+    aceite = app.test_client().post(resp.get_json()["convite_path"], json={"senha": SENHA})
+    assert aceite.status_code == 200
 
     op = app.test_client()
     resp = op.post("/auth/login", json={"nome_loja": LOJA, "login": "operador", "senha": SENHA})

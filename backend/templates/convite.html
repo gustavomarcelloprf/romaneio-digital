@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Definir senha — Romaneio Digital</title>
+    <link rel="stylesheet" href="/css/style.css" />
+    <link rel="stylesheet" href="/css/acesso.css?v=1" />
+  </head>
+  <body class="access">
+    <main class="access-shell">
+      <div class="access-card">
+        <header class="access-brand">
+          <div class="brand-mark" aria-hidden="true">RD</div>
+          <h1>Romaneio Digital</h1>
+          <p class="muted">Primeiro acesso</p>
+        </header>
+
+        <div id="msg" class="msg{% if not valido %} erro{% endif %}" role="status" aria-live="polite">
+          {%- if not valido %}Convite inválido ou expirado. Peça um novo link ao administrador da loja.{% endif -%}
+        </div>
+
+        {% if valido %}
+        <section id="viewConvite">
+          <p>Olá, <strong>{{ nome }}</strong>. Defina a senha do seu acesso
+             à loja <strong>{{ loja }}</strong> (login <strong>{{ login }}</strong>).</p>
+          <form id="formConvite" novalidate>
+            <div class="field">
+              <label for="conviteSenha">Nova senha *</label>
+              <div class="senha-wrap">
+                <input id="conviteSenha" name="senha" type="password" required
+                       minlength="6" autocomplete="new-password">
+                <button type="button" class="toggle-senha"
+                        aria-label="Mostrar senha" aria-pressed="false">Mostrar</button>
+              </div>
+              <p class="field-error"></p>
+            </div>
+            <div class="field">
+              <label for="conviteSenha2">Repita a senha *</label>
+              <input id="conviteSenha2" name="senha2" type="password" required
+                     minlength="6" autocomplete="new-password">
+              <p class="field-error"></p>
+            </div>
+            <button type="submit" class="btn-primary btn-submit">
+              <span class="spinner" aria-hidden="true"></span>
+              <span class="btn-label">Definir senha</span>
+            </button>
+          </form>
+        </section>
+        {% endif %}
+
+        <p id="irLogin" class="access-alt muted"{% if valido %} hidden{% endif %}>
+          <a href="/acesso">Ir para o login</a>
+        </p>
+      </div>
+    </main>
+
+    <noscript>Ative o JavaScript para usar o sistema.</noscript>
+    {% if valido %}<script src="/js/convite.js?v=1"></script>{% endif %}
+  </body>
+</html>

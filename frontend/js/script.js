@@ -28,7 +28,7 @@
         { id: "clientes",      label: "Clientes",      perm: "clientes_gerir" },
         { id: "equipe",        label: "Equipe",        perm: "usuarios_gerir" },
         // Despesas são dinheiro do dono, como as comissões a pagar.
-        { id: "despesas",      label: "Despesas",      perm: "relatorio_comissoes" },
+        { id: "despesas",      label: "Despesas",      perm: "despesas_gerir" },
         { id: "config",        label: "Configurações", perm: "config_editar" },
     ];
 
@@ -405,7 +405,7 @@
     }
 
     async function loadDespesas() {
-        if (!pode("relatorio_comissoes")) return;
+        if (!pode("despesas_gerir")) return;
         try {
             const res = await jfetch(`/api/despesas?${periodoQuery()}`);
             if (res) renderDespesas(res);
@@ -440,7 +440,7 @@
                             <td>${esc(u.login)}</td>
                             <td>${esc(u.papel)}</td>
                             <td>${esc(numberToPtbr(u.taxa_comissao))}</td>
-                            <td>${u.ativo ? 'Ativo' : '<span class="muted">Inativo</span>'}</td>
+                            <td>${u.ativo ? (u.convite_pendente ? '<span class="muted">Convite pendente</span>' : 'Ativo') : '<span class="muted">Inativo</span>'}</td>
                             <td class="actions">
                                 <button class="btn-secondary btn-sm edit-usuario-btn" data-id="${esc(u.id)}" data-nome="${esc(u.nome)}" data-taxa="${esc(u.taxa_comissao)}">Editar taxa</button>
                                 <button class="btn-secondary btn-sm toggle-usuario-btn ${u.ativo ? 'btn-danger' : ''}" data-id="${esc(u.id)}" data-ativo="${u.ativo ? 1 : 0}">${u.ativo ? 'Desativar' : 'Ativar'}</button>
@@ -869,13 +869,43 @@
             const data = Object.fromEntries(new FormData(e.target).entries());
             const msgEl = $("#usuarioMsg");
             try {
-                await jfetch("/usuarios", { method: "POST", body: JSON.stringify(data) });
+                const criado = await jfetch("/usuarios", { method: "POST", body: JSON.stringify(data) });
                 e.target.reset();
-                if (msgEl) msgEl.textContent = "Operador criado com sucesso!";
+                if (msgEl) msgEl.textContent = "Operador criado! Envie o link abaixo para ele definir a própria senha.";
+                mostrarConvite(criado);
                 loadUsuarios();
             } catch (err) {
                 if (msgEl) msgEl.textContent = `Erro: ${err.message}`;
             }
+        });
+
+        // O link é montado com a origem que o admin está usando (ex.: IP da LAN),
+        // que é a mesma pela qual o operador vai acessar o sistema.
+        function mostrarConvite(criado) {
+            const box = $("#conviteBox");
+            if (!box || !criado?.convite_path) return;
+            const link = `${window.location.origin}${criado.convite_path}`;
+            box.innerHTML = `
+                <label>Link de convite de ${esc(criado.nome)} (vale por 7 dias, uso único)
+                    <input id="conviteLink" type="text" readonly value="${esc(link)}">
+                </label>
+                <button type="button" id="copiarConviteBtn" class="btn-secondary btn-sm">Copiar link</button>`;
+            box.hidden = false;
+        }
+
+        $("#conviteBox")?.addEventListener('click', async e => {
+            if (!e.target.closest('#copiarConviteBtn')) return;
+            const input = $("#conviteLink");
+            if (!input) return;
+            const btn = e.target.closest('#copiarConviteBtn');
+            let ok = false;
+            // navigator.clipboard só existe em contexto seguro (https/localhost);
+            // pela LAN em http cai no execCommand.
+            try { await navigator.clipboard.writeText(input.value); ok = true; }
+            catch (_) { input.select(); try { ok = document.execCommand('copy'); } catch (_) {} }
+            btn.textContent = ok ? "Copiado!" : "Selecione e copie (Ctrl+C)";
+            if (!ok) input.select();
+            setTimeout(() => { btn.textContent = "Copiar link"; }, 2000);
         });
 
         usuariosWrap?.addEventListener('click', async e => {
