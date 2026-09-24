@@ -202,32 +202,62 @@
         const clienteSearchInput = $("#clienteSearch");
         if(!clienteSearchInput) return;
         const searchTerm = clienteSearchInput.value;
-        const clientes = await jfetch(`/clientes?search=${encodeURIComponent(searchTerm)}`);
-        
+        const podeFiado = pode("fiado_gerir");
+        const promessas = [jfetch(`/clientes?search=${encodeURIComponent(searchTerm)}`)];
+        if (podeFiado) promessas.push(jfetch("/api/fiado"));
+        const [clientes, fiado] = await Promise.all(promessas);
+
         if (Array.isArray(clientes)) {
             const optionsHtml = clientes.map(c => `<option value="${c.id}">${esc(c.nome)}</option>`).join("");
             $("#clienteId").innerHTML = optionsHtml;
             $("#editClienteId").innerHTML = optionsHtml;
 
+            const saldoPorCliente = new Map((fiado?.devedores || []).map(d => [d.cliente_id, d.saldo]));
+
             const clientesWrap = $("#clientesWrap");
             if (clientesWrap) {
                 clientesWrap.innerHTML = clientes.length ? `
                 <table class="table">
-                    <thead><tr><th>Nome</th><th>Telefone</th><th>Email</th><th>Ação</th></tr></thead>
+                    <thead><tr><th>Nome</th><th>Telefone</th><th>Email</th>${podeFiado ? '<th>Saldo devedor</th>' : ''}<th>Ação</th></tr></thead>
                     <tbody>${clientes.map(c => `
                     <tr>
                         <td>${esc(c.nome)}</td>
                         <td>${esc(c.telefone || '')}</td>
                         <td>${esc(c.email || '')}</td>
+                        ${podeFiado ? `<td>${fmtBRL(saldoPorCliente.get(c.id) || 0)}</td>` : ''}
                         <td class="actions">
                             <button class="btn-secondary btn-sm adjust-cliente-btn" data-id="${c.id}" data-telefone="${esc(c.telefone || '')}" data-email="${esc(c.email || '')}" data-nome="${esc(c.nome)}">Ajustar</button>
+                            ${podeFiado ? `<button class="btn-secondary btn-sm pagamento-cliente-btn" data-id="${c.id}" data-nome="${esc(c.nome)}">Registrar pagamento</button>` : ''}
                             <button class="btn-secondary btn-danger btn-sm remove-cliente-btn" data-id="${c.id}">Remover</button>
                         </td>
                     </tr>`).join('')}
                     </tbody>
                 </table>` : '<p class="muted">Nenhum cliente encontrado.</p>';
             }
+
+            const fiadoBlock = $("#fiadoBlock");
+            if (fiadoBlock) {
+                fiadoBlock.toggleAttribute("hidden", !podeFiado);
+                if (podeFiado && fiado) renderFiado(fiado);
+            }
         }
+    }
+
+    // Bloco "A receber": só lê o que /api/fiado já devolve (clientes com
+    // saldo > 0 e o total geral), sem endpoint próprio de listagem.
+    function renderFiado(fiado) {
+        const resumo = $("#fiadoResumo");
+        if (resumo) resumo.innerHTML = statCard("Total a receber", fmtBRL(fiado.total));
+        const wrap = $("#fiadoWrap");
+        if (!wrap) return;
+        const lista = fiado.devedores || [];
+        wrap.innerHTML = lista.length ? `
+            <table class="table">
+                <thead><tr><th>Cliente</th><th>Saldo devedor</th></tr></thead>
+                <tbody>${lista.map(d => `
+                    <tr><td>${esc(d.nome)}</td><td>${fmtBRL(d.saldo)}</td></tr>`).join('')}
+                </tbody>
+            </table>` : '<p class="muted">Nenhum cliente devedor no momento.</p>';
     }
     
     async function loadMe() {
@@ -911,7 +941,8 @@
                 cliente_id: $("#clienteId").value,
                 tecido: $("#tecido").value, preco_unitario: $("#preco").value,
                 desconto: $("#desconto").value, itens: state.novoPedido.itens,
-                descontar_estoque: $("#descontar_estoque").checked
+                descontar_estoque: $("#descontar_estoque").checked,
+                pago: !$("#fiado").checked
             };
             try {
                 await jfetch("/pedidos", { method: "POST", body: JSON.stringify(payload) });
@@ -984,6 +1015,21 @@
                     loadClients();
                 } catch (err) {
                     alert(`Erro ao atualizar cliente: ${err.message}`);
+                }
+            } else if (btn.classList.contains('pagamento-cliente-btn')) {
+                const { id, nome } = btn.dataset;
+                const valorStr = prompt(`Registrar pagamento de "${nome}"\n\nValor (R$):`, '');
+                if (valorStr === null) return;
+                const valor = ptbrToNumber(valorStr);
+                if (valor === null || valor <= 0) return alert('Valor inválido.');
+                try {
+                    await jfetch(`/api/clientes/${id}/pagamentos`, {
+                        method: 'POST',
+                        body: JSON.stringify({ valor, data: isoDate(new Date()) })
+                    });
+                    loadClients();
+                } catch (err) {
+                    alert(`Erro ao registrar pagamento: ${err.message}`);
                 }
             }
         });

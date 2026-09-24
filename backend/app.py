@@ -71,6 +71,9 @@ PERMISSOES = {
     "vender":              ("operador", "gerente", "admin"),
     "pedidos_ver":         ("operador", "gerente", "admin"),
     "clientes_gerir":      ("operador", "gerente", "admin"),
+    # Fiado: vender fiado é dentro do /pedidos (liberado a quem vende); ver
+    # saldos e registrar pagamento exige esta capacidade.
+    "fiado_gerir":         ("gerente", "admin"),
     # Estoque: qualquer um consulta; só gerente/admin mexem
     # (inclui a entrada de mercadoria / recebimento).
     "estoque_ver":         ("operador", "gerente", "admin"),
@@ -311,6 +314,117 @@ def cliente_update_api(cliente_id: int):
     finally:
         conn.close()
 
+# -----------------------------------------------------------------------------
+# API: Fiado (saldo devedor por cliente e pagamentos)
+# -----------------------------------------------------------------------------
+def _saldo_cliente(conn, loja, cliente_id):
+    total_fiado = conn.execute(
+        "SELECT COALESCE(SUM(total), 0) AS t FROM pedidos WHERE cliente_id = ? AND loja = ? AND pago = 0",
+        (cliente_id, loja),
+    ).fetchone()["t"]
+    total_pago = conn.execute(
+        "SELECT COALESCE(SUM(valor), 0) AS t FROM pagamentos WHERE cliente_id = ? AND loja = ?",
+        (cliente_id, loja),
+    ).fetchone()["t"]
+    return round(total_fiado - total_pago, 2)
+
+
+@app.post("/api/clientes/<int:cliente_id>/pagamentos")
+@require_login
+@require_perm("fiado_gerir")
+def cliente_pagamento_criar(cliente_id: int):
+    loja = current_loja()
+    data = request.get_json(silent=True) or {}
+    valor = _ptbr_to_float(data.get("valor"))
+    data_pagamento = (data.get("data") or "").strip()
+    if valor is None or valor <= 0:
+        return jsonify(error="Valor do pagamento deve ser maior que zero."), 400
+    if not data_pagamento:
+        return jsonify(error="Data do pagamento é obrigatória."), 400
+
+    conn = get_conn()
+    try:
+        if not conn.execute("SELECT 1 FROM clientes WHERE id = ? AND loja = ?", (cliente_id, loja)).fetchone():
+            return jsonify(error="Cliente inválido para esta loja."), 404
+        cur = conn.execute(
+            "INSERT INTO pagamentos (loja, cliente_id, valor, data) VALUES (?, ?, ?, ?)",
+            (loja, cliente_id, valor, data_pagamento),
+        )
+        conn.commit()
+        saldo = _saldo_cliente(conn, loja, cliente_id)
+        return jsonify(id=cur.lastrowid, cliente_id=cliente_id, valor=round(valor, 2),
+                        data=data_pagamento, saldo=saldo), 201
+    except sqlite3.Error as e:
+        conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+
+
+@app.get("/api/clientes/<int:cliente_id>/saldo")
+@require_login
+@require_perm("fiado_gerir")
+def cliente_saldo_api(cliente_id: int):
+    loja = current_loja()
+    conn = get_conn()
+    try:
+        if not conn.execute("SELECT 1 FROM clientes WHERE id = ? AND loja = ?", (cliente_id, loja)).fetchone():
+            return jsonify(error="Cliente inválido para esta loja."), 404
+        saldo = _saldo_cliente(conn, loja, cliente_id)
+    finally:
+        conn.close()
+    return jsonify(cliente_id=cliente_id, saldo=saldo)
+
+
+@app.get("/api/fiado")
+@require_login
+@require_perm("fiado_gerir")
+def fiado_listar():
+    loja = current_loja()
+    conn = get_conn()
+    try:
+        rows = conn.execute("""
+            SELECT * FROM (
+                SELECT c.id AS cliente_id, c.nome AS nome,
+                       COALESCE(pf.total, 0) - COALESCE(pg.total, 0) AS saldo
+                FROM clientes c
+                LEFT JOIN (
+                    SELECT cliente_id, SUM(total) AS total FROM pedidos
+                    WHERE loja = ? AND pago = 0 GROUP BY cliente_id
+                ) pf ON pf.cliente_id = c.id
+                LEFT JOIN (
+                    SELECT cliente_id, SUM(valor) AS total FROM pagamentos
+                    WHERE loja = ? GROUP BY cliente_id
+                ) pg ON pg.cliente_id = c.id
+                WHERE c.loja = ?
+            )
+            WHERE saldo > 0
+            ORDER BY saldo DESC
+        """, (loja, loja, loja)).fetchall()
+    finally:
+        conn.close()
+    devedores = [{"cliente_id": r["cliente_id"], "nome": r["nome"], "saldo": round(r["saldo"], 2)} for r in rows]
+    total = round(sum(d["saldo"] for d in devedores), 2)
+    return jsonify(devedores=devedores, total=total)
+
+
+@app.post("/pedidos/<int:pedido_id>/quitar")
+@require_login
+@require_perm("fiado_gerir")
+def pedido_quitar(pedido_id: int):
+    loja = current_loja()
+    conn = get_conn()
+    try:
+        cur = conn.execute("UPDATE pedidos SET pago = 1 WHERE id = ? AND loja = ?", (pedido_id, loja))
+        if cur.rowcount == 0:
+            return jsonify(error="Pedido não encontrado."), 404
+        conn.commit()
+        return jsonify(ok=True, message="Pedido marcado como pago.")
+    except sqlite3.Error as e:
+        conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+
+
 @app.get("/me")
 @require_login
 def me_api():
@@ -438,6 +552,8 @@ def pedidos_api():
         itens_in = data.get("itens") or []
         descontar_estoque = data.get("descontar_estoque", False)
         tecido_nome = (data.get("tecido") or "").strip()
+        # Fiado é só forma de pagamento: não muda baixa de estoque nem comissão.
+        pago = 0 if data.get("pago", True) in (0, False, "0", "false", "False") else 1
 
         if not all([cliente_id, preco_unitario is not None, itens_in, tecido_nome]):
             conn.close()
@@ -492,8 +608,8 @@ def pedidos_api():
 
             now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
             cur_pedido = conn.execute(
-                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, usuario_id, comissao_taxa, comissao_valor)
+                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor, pago) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, usuario_id, comissao_taxa, comissao_valor, pago)
             )
             pedido_id = cur_pedido.lastrowid
 

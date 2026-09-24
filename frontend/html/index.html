@@ -58,6 +58,11 @@
                             <label for="descontar_estoque">Descontar do estoque</label>
                         </div>
 
+                        <div class="form-group-checkbox">
+                            <input type="checkbox" id="fiado" name="fiado">
+                            <label for="fiado">Fiado (não pago)</label>
+                        </div>
+
                         <div class="totals-card">
                             <div class="totals-row">
                                 <span class="muted">Total (auto):</span>
@@ -181,6 +186,13 @@
                     <h3>Clientes Registrados</h3>
                     <div class="form-group"><input type="search" id="clienteSearch" placeholder="Buscar cliente por nome..."></div>
                     <div id="clientesWrap" class="table-responsive"></div>
+
+                    <!-- Só aparece para quem tem fiado_gerir (gerente/admin). -->
+                    <div id="fiadoBlock" class="card-inset" hidden>
+                        <h3>A receber (Fiado)</h3>
+                        <div id="fiadoResumo" class="dash-cards"></div>
+                        <div id="fiadoWrap" class="table-responsive"></div>
+                    </div>
                 </section>
 
                 <!-- ====== Tela: Equipe (somente admin; o vendedor de um
