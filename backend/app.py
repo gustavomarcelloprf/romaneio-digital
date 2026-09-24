@@ -1625,7 +1625,14 @@ def relatorio_loja():
         # comissões: o gerente não recebe nem a chave no JSON.
         payload["despesas_total"] = despesas_total
         payload["despesas_por_categoria"] = despesas_por_categoria
-        payload["lucro"] = round(faturamento_total - despesas_total, 2)
+        # Comissão também é saída do dono: entra no lucro, mas fica numa
+        # linha própria no detalhe em vez de misturada às categorias.
+        saidas_total = round(despesas_total + comissoes_a_pagar, 2)
+        payload["saidas_total"] = saidas_total
+        payload["saidas_detalhe"] = [
+            {"categoria": c["categoria"], "valor": c["total"]} for c in despesas_por_categoria
+        ] + [{"categoria": "Comissões (vendas)", "valor": comissoes_a_pagar}]
+        payload["lucro"] = round(faturamento_total - saidas_total, 2)
     return jsonify(**payload)
 
 @app.get("/api/relatorio/meu")
@@ -1862,7 +1869,7 @@ def despesas_listar():
     conn = get_conn()
     try:
         despesas = [dict(r) for r in conn.execute(
-            "SELECT id, data, descricao, categoria, valor FROM despesas "
+            "SELECT id, data, descricao, categoria, valor, recorrente_id FROM despesas "
             "WHERE loja = ? AND data >= ? AND data < ? ORDER BY data DESC, id DESC",
             (loja, de, ate_ex),
         ).fetchall()]
@@ -1887,6 +1894,210 @@ def despesa_delete(despesa_id):
     finally:
         conn.close()
     return jsonify(ok=True)
+
+
+@app.post("/api/despesas")
+@require_login
+@require_perm(PERM_DESPESAS)
+def despesa_criar():
+    """Gasto avulso digitado à mão (complementa a planilha e os recorrentes)."""
+    loja = current_loja()
+    data = request.get_json(silent=True) or {}
+    data_iso = _parse_data_despesa(data.get("data"))
+    valor = _parse_valor_despesa(data.get("valor"))
+    if not data_iso:
+        return jsonify(error="Data inválida."), 400
+    if valor is None or valor <= 0:
+        return jsonify(error="Valor deve ser maior que zero."), 400
+    descricao = str(data.get("descricao") or "").strip()
+    categoria = str(data.get("categoria") or "").strip()
+    conn = get_conn()
+    try:
+        new_id = conn.execute(
+            "INSERT INTO despesas (loja, data, descricao, categoria, valor) VALUES (?, ?, ?, ?, ?)",
+            (loja, data_iso, descricao, categoria, round(valor, 2)),
+        ).lastrowid
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+    return jsonify(id=new_id, data=data_iso, descricao=descricao,
+                   categoria=categoria, valor=round(valor, 2)), 201
+
+
+# --- Gastos recorrentes: modelos sem valor fixo, lançados mês a mês ---
+def _recorrente_dict(r):
+    return {"id": r["id"], "nome": r["nome"], "categoria": r["categoria"] or "",
+            "ativo": bool(r["ativo"])}
+
+
+@app.get("/api/despesas/recorrentes")
+@require_login
+@require_perm(PERM_DESPESAS)
+def recorrentes_listar():
+    loja = current_loja()
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, nome, categoria, ativo FROM despesas_recorrentes "
+            "WHERE loja = ? ORDER BY ativo DESC, nome COLLATE NOCASE",
+            (loja,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return jsonify([_recorrente_dict(r) for r in rows])
+
+
+@app.post("/api/despesas/recorrentes")
+@require_login
+@require_perm(PERM_DESPESAS)
+def recorrente_criar():
+    loja = current_loja()
+    data = request.get_json(silent=True) or {}
+    nome = str(data.get("nome") or "").strip()
+    categoria = str(data.get("categoria") or "").strip()
+    if not nome:
+        return jsonify(error="Informe o nome do gasto recorrente."), 400
+    conn = get_conn()
+    try:
+        new_id = conn.execute(
+            "INSERT INTO despesas_recorrentes (loja, nome, categoria) VALUES (?, ?, ?)",
+            (loja, nome, categoria),
+        ).lastrowid
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+    return jsonify(id=new_id, nome=nome, categoria=categoria, ativo=True), 201
+
+
+@app.put("/api/despesas/recorrentes/<int:recorrente_id>")
+@require_login
+@require_perm(PERM_DESPESAS)
+def recorrente_editar(recorrente_id):
+    """Edita nome/categoria e/ou ativa-desativa. Campos ausentes ficam como estão."""
+    loja = current_loja()
+    data = request.get_json(silent=True) or {}
+    conn = get_conn()
+    try:
+        atual = conn.execute(
+            "SELECT id, nome, categoria, ativo FROM despesas_recorrentes WHERE id = ? AND loja = ?",
+            (recorrente_id, loja),
+        ).fetchone()
+        if not atual:
+            return jsonify(error="Gasto recorrente não encontrado."), 404
+        nome = str(data["nome"]).strip() if "nome" in data else atual["nome"]
+        if not nome:
+            return jsonify(error="Informe o nome do gasto recorrente."), 400
+        categoria = str(data.get("categoria") or "").strip() if "categoria" in data else atual["categoria"]
+        ativo = (1 if data["ativo"] in (1, True, "1", "true") else 0) if "ativo" in data else atual["ativo"]
+        conn.execute(
+            "UPDATE despesas_recorrentes SET nome = ?, categoria = ?, ativo = ? WHERE id = ? AND loja = ?",
+            (nome, categoria, ativo, recorrente_id, loja),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, nome, categoria, ativo FROM despesas_recorrentes WHERE id = ?", (recorrente_id,)
+        ).fetchone()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+    return jsonify(_recorrente_dict(row))
+
+
+@app.get("/api/despesas/recorrentes/sugestao")
+@require_login
+@require_perm(PERM_DESPESAS)
+def recorrentes_sugestao():
+    """Recorrentes ativos com o valor do último lançamento de cada um (0 se nunca)."""
+    loja = current_loja()
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT r.id, r.nome, r.categoria, r.ativo, "
+            "COALESCE((SELECT d.valor FROM despesas d "
+            "          WHERE d.recorrente_id = r.id AND d.loja = r.loja "
+            "          ORDER BY d.data DESC, d.id DESC LIMIT 1), 0) AS valor_sugerido "
+            "FROM despesas_recorrentes r "
+            "WHERE r.loja = ? AND r.ativo = 1 ORDER BY r.nome COLLATE NOCASE",
+            (loja,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return jsonify([
+        {**_recorrente_dict(r), "valor_sugerido": round(r["valor_sugerido"], 2)} for r in rows
+    ])
+
+
+@app.post("/api/despesas/lancar-mes")
+@require_login
+@require_perm(PERM_DESPESAS)
+def despesas_lancar_mes():
+    """Cria uma despesa por item {recorrente_id, valor}, herdando nome/categoria
+    do modelo. Itens inválidos voltam em `erros`; os válidos entram juntos."""
+    loja = current_loja()
+    data = request.get_json(silent=True) or {}
+    data_iso = _parse_data_despesa(data.get("data"))
+    if not data_iso:
+        return jsonify(error="Data inválida."), 400
+    itens = data.get("itens")
+    if not isinstance(itens, list) or not itens:
+        return jsonify(error="Nenhum item para lançar."), 400
+
+    conn = get_conn()
+    try:
+        modelos = {
+            r["id"]: r for r in conn.execute(
+                "SELECT id, nome, categoria FROM despesas_recorrentes WHERE loja = ? AND ativo = 1",
+                (loja,),
+            ).fetchall()
+        }
+        validas, erros, vistos = [], [], set()
+        for n, item in enumerate(itens, start=1):
+            item = item if isinstance(item, dict) else {}
+            try:
+                rid = int(item.get("recorrente_id"))
+            except (TypeError, ValueError):
+                rid = None
+            modelo = modelos.get(rid)
+            valor = _parse_valor_despesa(item.get("valor"))
+            if not modelo:
+                erros.append({"linha": n, "recorrente_id": item.get("recorrente_id"),
+                              "erro": "gasto recorrente inexistente ou inativo"})
+            elif rid in vistos:
+                erros.append({"linha": n, "recorrente_id": rid, "erro": "lançado em duplicidade"})
+            elif valor is None:
+                erros.append({"linha": n, "recorrente_id": rid, "erro": "valor inválido"})
+            elif valor <= 0:
+                erros.append({"linha": n, "recorrente_id": rid, "erro": "valor deve ser maior que zero"})
+            else:
+                vistos.add(rid)
+                validas.append((loja, data_iso, modelo["nome"], modelo["categoria"] or "",
+                                round(valor, 2), rid))
+        if not validas:
+            return jsonify(error="Nenhum item válido para lançar.", erros=erros), 400
+        conn.executemany(
+            "INSERT INTO despesas (loja, data, descricao, categoria, valor, recorrente_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            validas,
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+    return jsonify(
+        lancadas=len(validas),
+        erros=erros,
+        total=round(sum(v[4] for v in validas), 2),
+    ), 201
 
 # -----------------------------------------------------------------------------
 # API: PIX e Exportações

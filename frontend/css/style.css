@@ -399,6 +399,20 @@ button {
 }
 .stat-card .stat-value.is-negativo { color: #dc2626; }
 
+/* Card de Saídas: botão que expande o detalhe por categoria */
+button.stat-card {
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    width: 100%;
+}
+button.stat-card:hover { border-color: var(--primary); }
+.stat-card .stat-hint { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.saidas-detalhe { margin: 4px 0 12px; }
+.saidas-detalhe .linha-comissao td { font-style: italic; }
+.recorrentes-lancar td input { width: 100%; min-width: 90px; }
+
 /* Despesas: resultado da importação */
 .import-erros {
     margin: 8px 0 0;

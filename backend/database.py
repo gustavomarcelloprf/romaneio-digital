@@ -175,6 +175,22 @@ def init_db() -> None:
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_despesas_loja_data ON despesas(loja, data)")
 
+    # Modelos de gasto recorrente (aluguel, luz, "Salário Maria"...). Não têm
+    # valor fixo: o valor varia e é digitado a cada lançamento mensal, que
+    # vira uma linha em despesas com recorrente_id apontando para cá.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS despesas_recorrentes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja        TEXT NOT NULL,
+            nome        TEXT NOT NULL,
+            categoria   TEXT,
+            ativo       INTEGER DEFAULT 1,
+            created_at  TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (loja) REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE CASCADE
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_despesas_recorrentes_loja ON despesas_recorrentes(loja)")
+
     # 4. Entrada de mercadoria (recebimento avulso): cabeçalho do lote.
     #    O efeito no estoque é somar o peso em estoque_cores.
     cur.execute("""
@@ -262,6 +278,11 @@ def init_db() -> None:
                      "TEXT NOT NULL DEFAULT 'pedido' CHECK(status IN ('orcamento','pedido'))")
     # Alerta de estoque: 0 = sem mínimo definido (nunca alerta).
     _garantir_coluna(cur, "estoque_cores", "estoque_minimo", "REAL NOT NULL DEFAULT 0")
+    # Liga o lançamento ao seu modelo recorrente (NULL = avulsa/importada).
+    # Apagar o modelo não apaga o histórico: o vínculo só some.
+    _garantir_coluna(cur, "despesas", "recorrente_id",
+                     "INTEGER REFERENCES despesas_recorrentes(id) ON DELETE SET NULL")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_despesas_recorrente ON despesas(recorrente_id)")
 
     conn.commit()
     conn.close()
