@@ -189,6 +189,34 @@ def init_db() -> None:
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_rolos_entrada ON rolos(entrada_id)")
 
+    # 6. Encomenda: o que está PREVISTO chegar. Nunca mexe no estoque — só o
+    #    recebimento (que credita como uma entrada) faz isso.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS encomendas (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja          TEXT NOT NULL,
+            fornecedor    TEXT,
+            data_prevista TEXT,
+            status        TEXT NOT NULL DEFAULT 'aberta',
+            created_at    TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (loja) REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE CASCADE
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_encomendas_loja ON encomendas(loja)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS encomenda_itens (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            encomenda_id     INTEGER NOT NULL,
+            tecido           TEXT NOT NULL,
+            cor              TEXT NOT NULL,
+            peso_previsto    REAL NOT NULL DEFAULT 0,
+            rolos_previstos  INTEGER,
+            FOREIGN KEY (encomenda_id) REFERENCES encomendas(id) ON DELETE CASCADE
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_encomenda_itens_encomenda ON encomenda_itens(encomenda_id)")
+
     conn.commit()
     conn.close()
 

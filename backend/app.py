@@ -938,6 +938,266 @@ def registrar_entrada():
     ), 201
 
 # -----------------------------------------------------------------------------
+# API: Encomendas (o que está PREVISTO chegar)
+# -----------------------------------------------------------------------------
+# O previsto nunca mexe no estoque. Ao "receber", os pesos REAIS (que podem
+# diferir do previsto) creditam o estoque pelo MESMO caminho da entrada
+# (soma em estoque_cores, cria cor se preciso, grava rolos se vier id) — o
+# recebimento inclusive grava uma linha em `entradas`, então ele aparece no
+# histórico de entradas como qualquer outro recebimento.
+def _get_encomenda(encomenda_id, loja):
+    conn = get_conn()
+    try:
+        enc = conn.execute(
+            "SELECT id, loja, fornecedor, data_prevista, status, created_at FROM encomendas WHERE id = ? AND loja = ?",
+            (encomenda_id, loja),
+        ).fetchone()
+        if not enc:
+            return None, None
+        itens = conn.execute(
+            "SELECT id, tecido, cor, peso_previsto, rolos_previstos FROM encomenda_itens WHERE encomenda_id = ? ORDER BY id",
+            (encomenda_id,),
+        ).fetchall()
+        return dict(enc), [dict(i) for i in itens]
+    finally:
+        conn.close()
+
+def _validar_itens_encomenda(itens_in):
+    """Normaliza os itens previstos e devolve (itens, erros). erros = [{linha, erro}], 1-based."""
+    itens, erros = [], []
+    for i, it in enumerate(itens_in, start=1):
+        if not isinstance(it, dict):
+            erros.append({"linha": i, "erro": "Item inválido."}); continue
+        tecido = _texto_celula(it.get("tecido"))
+        cor = _texto_celula(it.get("cor"))
+        peso_previsto = _peso_to_float(it.get("peso_previsto"))
+        rolos_previstos_raw = it.get("rolos_previstos")
+        faltando = [n for n, v in (("tecido", tecido), ("cor", cor)) if not v]
+        if faltando:
+            erros.append({"linha": i, "erro": f"Campo obrigatório vazio: {', '.join(faltando)}."}); continue
+        if peso_previsto is None or peso_previsto <= 0:
+            erros.append({"linha": i, "erro": f"Peso previsto inválido: '{_texto_celula(it.get('peso_previsto'))}'."}); continue
+        try:
+            rolos_previstos = int(rolos_previstos_raw) if rolos_previstos_raw not in (None, "") else None
+            if rolos_previstos is not None and rolos_previstos < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            erros.append({"linha": i, "erro": "Rolos previstos inválido."}); continue
+        itens.append({"tecido": tecido, "cor": cor, "peso_previsto": round(peso_previsto, 3), "rolos_previstos": rolos_previstos})
+    return itens, erros
+
+def _validar_linhas_recebimento(linhas_in, itens_validos):
+    """Como _validar_linhas_entrada, mas cada linha pode trazer o item_id previsto que credita."""
+    linhas, erros = [], []
+    for i, it in enumerate(linhas_in, start=1):
+        if not isinstance(it, dict):
+            erros.append({"linha": i, "erro": "Linha inválida."}); continue
+        item_id_raw = it.get("item_id")
+        item_id = None
+        if item_id_raw not in (None, ""):
+            try:
+                item_id = int(item_id_raw)
+            except (TypeError, ValueError):
+                erros.append({"linha": i, "erro": "Item inválido."}); continue
+            if item_id not in itens_validos:
+                erros.append({"linha": i, "erro": "Item não pertence a esta encomenda."}); continue
+        tecido = _texto_celula(it.get("tecido"))
+        cor = _texto_celula(it.get("cor"))
+        peso = _peso_to_float(it.get("peso"))
+        id_rolo = _texto_celula(it.get("id_rolo")) or None
+        faltando = [n for n, v in (("tecido", tecido), ("cor", cor)) if not v]
+        if faltando:
+            erros.append({"linha": i, "erro": f"Campo obrigatório vazio: {', '.join(faltando)}."}); continue
+        if peso is None or peso <= 0:
+            erros.append({"linha": i, "erro": f"Peso inválido: '{_texto_celula(it.get('peso'))}'."}); continue
+        linhas.append({"item_id": item_id, "tecido": tecido, "cor": cor, "peso": round(peso, 3), "id_rolo": id_rolo})
+    return linhas, erros
+
+@app.post("/api/encomendas")
+@require_login
+@require_perm("estoque_mutar")
+def criar_encomenda():
+    loja = current_loja()
+    data = request.get_json(silent=True) or {}
+    fornecedor = (data.get("fornecedor") or "").strip() or None
+    data_prevista = (data.get("data_prevista") or "").strip() or None
+    itens_in = data.get("itens")
+    if not isinstance(itens_in, list) or not itens_in:
+        return jsonify(error="Informe ao menos um item previsto (tecido, cor, peso_previsto)."), 400
+
+    itens, erros = _validar_itens_encomenda(itens_in)
+    if erros:
+        return jsonify(error="Há itens inválidos na encomenda.", erros=erros), 400
+
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN")
+        encomenda_id = conn.execute(
+            "INSERT INTO encomendas (loja, fornecedor, data_prevista, status) VALUES (?, ?, ?, 'aberta')",
+            (loja, fornecedor, data_prevista),
+        ).lastrowid
+        conn.executemany(
+            "INSERT INTO encomenda_itens (encomenda_id, tecido, cor, peso_previsto, rolos_previstos) VALUES (?, ?, ?, ?, ?)",
+            [(encomenda_id, it["tecido"], it["cor"], it["peso_previsto"], it["rolos_previstos"]) for it in itens],
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+
+    enc, itens_db = _get_encomenda(encomenda_id, loja)
+    return jsonify(**enc, itens=itens_db), 201
+
+@app.get("/api/encomendas")
+@require_login
+@require_perm("estoque_mutar")
+def listar_encomendas():
+    loja = current_loja()
+    status = (request.args.get("status") or "").strip()
+    conn = get_conn()
+    try:
+        query = "SELECT id, fornecedor, data_prevista, status, created_at FROM encomendas WHERE loja = ?"
+        params = [loja]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY id DESC"
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.get("/api/encomendas/<int:encomenda_id>")
+@require_login
+@require_perm("estoque_mutar")
+def detalhe_encomenda(encomenda_id):
+    loja = current_loja()
+    enc, itens = _get_encomenda(encomenda_id, loja)
+    if not enc:
+        return jsonify(error="Encomenda não encontrada."), 404
+    return jsonify(**enc, itens=itens)
+
+@app.post("/api/encomendas/<int:encomenda_id>/receber")
+@require_login
+@require_perm("estoque_mutar")
+def receber_encomenda(encomenda_id):
+    loja = current_loja()
+    enc, itens_previstos = _get_encomenda(encomenda_id, loja)
+    if not enc:
+        return jsonify(error="Encomenda não encontrada."), 404
+    if enc["status"] == "recebida":
+        return jsonify(error="Encomenda já recebida."), 409
+
+    data = request.get_json(silent=True) or {}
+    fornecedor = (data.get("fornecedor") or "").strip() or enc["fornecedor"]
+    data_recebimento = (data.get("data") or "").strip() or datetime.now().strftime("%Y-%m-%d")
+    linhas_in = data.get("linhas")
+    if not isinstance(linhas_in, list) or not linhas_in:
+        return jsonify(error="Informe ao menos uma linha recebida (tecido, cor, peso)."), 400
+    if len(linhas_in) > ENTRADA_MAX_LINHAS:
+        return jsonify(error=f"Máximo de {ENTRADA_MAX_LINHAS} linhas por recebimento."), 400
+
+    itens_validos = {it["id"] for it in itens_previstos}
+    linhas, erros = _validar_linhas_recebimento(linhas_in, itens_validos)
+    if erros:
+        return jsonify(error="Há linhas inválidas no recebimento.", erros=erros), 400
+
+    ids_rolo = [l["id_rolo"] for l in linhas if l["id_rolo"]]
+    repetidos = sorted({r for r in ids_rolo if ids_rolo.count(r) > 1})
+    if repetidos:
+        return jsonify(error=f"Id de rolo repetido no recebimento: {', '.join(repetidos)}."), 400
+
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN")
+        if ids_rolo:
+            marcas = ",".join("?" * len(ids_rolo))
+            ja = [r["roll_ext_id"] for r in conn.execute(
+                f"SELECT roll_ext_id FROM rolos WHERE loja = ? AND roll_ext_id IN ({marcas})",
+                (loja, *ids_rolo),
+            ).fetchall()]
+            if ja:
+                conn.rollback()
+                return jsonify(error=f"Rolo(s) já recebido(s) antes: {', '.join(sorted(ja))}."), 409
+
+        tecidos = {
+            r["nome_tecido"].casefold(): (r["id"], r["nome_tecido"])
+            for r in conn.execute("SELECT id, nome_tecido FROM estoque_tecidos WHERE loja = ?", (loja,)).fetchall()
+        }
+        desconhecidos = sorted({l["tecido"] for l in linhas if l["tecido"].casefold() not in tecidos})
+        if desconhecidos:
+            conn.rollback()
+            return jsonify(error=f"Tecido(s) não cadastrado(s) no estoque: {', '.join(desconhecidos)}. Cadastre o tecido antes de receber."), 400
+
+        entrada_id = conn.execute(
+            "INSERT INTO entradas (loja, fornecedor, data) VALUES (?, ?, ?)",
+            (loja, fornecedor, data_recebimento),
+        ).lastrowid
+
+        cores_cache = {}
+        cores_criadas = []
+        for l in linhas:
+            tecido_id, tecido_nome = tecidos[l["tecido"].casefold()]
+            if tecido_id not in cores_cache:
+                cores_cache[tecido_id] = {
+                    r["nome_cor"].casefold(): (r["id"], r["nome_cor"])
+                    for r in conn.execute("SELECT id, nome_cor FROM estoque_cores WHERE tecido_id = ?", (tecido_id,)).fetchall()
+                }
+            cores = cores_cache[tecido_id]
+            chave = l["cor"].casefold()
+            if chave in cores:
+                cor_id, cor_nome = cores[chave]
+                conn.execute("UPDATE estoque_cores SET peso_kg = ROUND(peso_kg + ?, 3) WHERE id = ?", (l["peso"], cor_id))
+            else:
+                cor_nome = l["cor"]
+                cor_id = conn.execute(
+                    "INSERT INTO estoque_cores (tecido_id, nome_cor, peso_kg, qtd_pecas) VALUES (?, ?, ?, 0)",
+                    (tecido_id, cor_nome, l["peso"]),
+                ).lastrowid
+                cores[chave] = (cor_id, cor_nome)
+                cores_criadas.append({"tecido": tecido_nome, "cor": cor_nome})
+            if l["id_rolo"]:
+                conn.execute(
+                    "INSERT INTO rolos (loja, entrada_id, tecido, cor, roll_ext_id, peso) VALUES (?, ?, ?, ?, ?, ?)",
+                    (loja, entrada_id, tecido_nome, cor_nome, l["id_rolo"], l["peso"]),
+                )
+
+        conn.execute("UPDATE encomendas SET status = 'recebida' WHERE id = ?", (encomenda_id,))
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+
+    recebido_por_item = {}
+    for l in linhas:
+        if l["item_id"] is not None:
+            recebido_por_item[l["item_id"]] = recebido_por_item.get(l["item_id"], 0.0) + l["peso"]
+
+    variacao = [{
+        "item_id": it["id"],
+        "tecido": it["tecido"],
+        "cor": it["cor"],
+        "peso_previsto": it["peso_previsto"],
+        "peso_recebido": round(recebido_por_item.get(it["id"], 0.0), 3),
+        "variacao": round(recebido_por_item.get(it["id"], 0.0) - it["peso_previsto"], 3),
+    } for it in itens_previstos]
+
+    return jsonify(
+        id=entrada_id,
+        encomenda_id=encomenda_id,
+        status="recebida",
+        linhas=len(linhas),
+        peso_total=round(sum(l["peso"] for l in linhas), 3),
+        rolos=len(ids_rolo),
+        cores_criadas=cores_criadas,
+        variacao=variacao,
+    ), 201
+
+# -----------------------------------------------------------------------------
 # API: Relatórios (dashboards) — sempre escopados pela loja da sessão
 # -----------------------------------------------------------------------------
 def _periodo_from_args():
