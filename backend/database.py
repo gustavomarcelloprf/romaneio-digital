@@ -101,6 +101,9 @@ def init_db() -> None:
             desconto     REAL DEFAULT 0,
             comissao_taxa  REAL NOT NULL DEFAULT 0,
             comissao_valor REAL NOT NULL DEFAULT 0,
+            -- pago=1: à vista (default). pago=0: fiado, entra no saldo devedor
+            -- do cliente até um pagamento (tabela pagamentos) cobrir o total.
+            pago         INTEGER NOT NULL DEFAULT 1,
             observacoes  TEXT,
             created_at   TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE SET NULL,
@@ -231,6 +234,23 @@ def init_db() -> None:
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_encomenda_itens_encomenda ON encomenda_itens(encomenda_id)")
+
+    # Abatimentos do saldo devedor de um cliente (vendas fiado, pago=0).
+    # O saldo em si não é armazenado: é sempre recalculado (SUM pedidos
+    # fiado - SUM pagamentos) para nunca dessincronizar.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS pagamentos (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            loja        TEXT NOT NULL,
+            cliente_id  INTEGER NOT NULL,
+            valor       REAL NOT NULL,
+            data        TEXT NOT NULL,
+            created_at  TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (loja) REFERENCES lojas(codigo) ON UPDATE CASCADE ON DELETE CASCADE,
+            FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE CASCADE
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_pagamentos_cliente ON pagamentos(loja, cliente_id)")
 
     conn.commit()
     conn.close()
