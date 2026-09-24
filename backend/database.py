@@ -283,6 +283,9 @@ def init_db() -> None:
     _garantir_coluna(cur, "despesas", "recorrente_id",
                      "INTEGER REFERENCES despesas_recorrentes(id) ON DELETE SET NULL")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_despesas_recorrente ON despesas(recorrente_id)")
+    # Intenção de baixa gravada no pedido/orçamento: um orçamento de venda
+    # casada (tecido não rastreado) nasce com 0 para a conversão não baixar.
+    _garantir_coluna(cur, "pedidos", "descontar_estoque", "INTEGER NOT NULL DEFAULT 1")
 
     conn.commit()
     conn.close()

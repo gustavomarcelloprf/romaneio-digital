@@ -677,7 +677,9 @@ def pedidos_api():
         cliente_id = data.get("cliente_id")
         preco_unitario = _ptbr_to_float(data.get("preco_unitario"))
         itens_in = data.get("itens") or []
-        descontar_estoque = data.get("descontar_estoque", False)
+        # Intenção gravada no pedido: para orçamento, não baixa agora, mas
+        # a conversão (POST /pedidos/<id>/converter) respeita esse valor depois.
+        descontar_estoque = data.get("descontar_estoque") in (True, 1, "1", "true", "True")
         # Orçamento: não baixa estoque e não congela comissão (fica 0 até a
         # conversão em POST /pedidos/<id>/converter).
         is_orcamento = data.get("is_orcamento") in (True, 1, "1", "true")
@@ -716,8 +718,8 @@ def pedidos_api():
 
             now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
             cur_pedido = conn.execute(
-                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor, pago, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, usuario_id, comissao_taxa, comissao_valor, pago, status)
+                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor, pago, status, descontar_estoque) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, usuario_id, comissao_taxa, comissao_valor, pago, status, int(descontar_estoque))
             )
             pedido_id = cur_pedido.lastrowid
 
@@ -749,7 +751,7 @@ def pedido_converter_api(pedido_id: int):
         # simultâneas não baixarem o estoque duas vezes.
         conn.execute("BEGIN IMMEDIATE")
         pedido = conn.execute(
-            "SELECT id, tecido, total, usuario_id, status FROM pedidos WHERE id = ? AND loja = ?",
+            "SELECT id, tecido, total, usuario_id, status, descontar_estoque FROM pedidos WHERE id = ? AND loja = ?",
             (pedido_id, loja),
         ).fetchone()
         if not pedido:
@@ -759,8 +761,11 @@ def pedido_converter_api(pedido_id: int):
             conn.rollback()
             return jsonify(error="Este pedido já foi convertido."), 409
 
-        itens = conn.execute("SELECT cor, peso_kg FROM itens_pedido WHERE pedido_id = ?", (pedido_id,)).fetchall()
-        _baixar_estoque(conn, loja, pedido["tecido"], [(i["cor"], i["peso_kg"]) for i in itens])
+        # Venda casada (tecido não rastreado em estoque): o orçamento nasceu
+        # com descontar_estoque=0 e a conversão não deve tocar no estoque.
+        if pedido["descontar_estoque"]:
+            itens = conn.execute("SELECT cor, peso_kg FROM itens_pedido WHERE pedido_id = ?", (pedido_id,)).fetchall()
+            _baixar_estoque(conn, loja, pedido["tecido"], [(i["cor"], i["peso_kg"]) for i in itens])
 
         vendedor = get_usuario_by_id(pedido["usuario_id"]) if pedido["usuario_id"] else None
         comissao_taxa = _taxa_comissao(vendedor)
