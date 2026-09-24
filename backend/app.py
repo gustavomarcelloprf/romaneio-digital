@@ -120,6 +120,43 @@ def _ptbr_to_float(val):
 class EstoqueInsuficiente(Exception):
     """Venda que o estoque não cobre: aborta a transação com mensagem clara (409)."""
 
+def _baixar_estoque(conn, loja, tecido_nome, itens):
+    """Baixa POR PESO do estoque, dentro da transação do chamador.
+
+    `itens` são pares (cor, peso). A venda sai do total (kg) da cor; várias
+    linhas da mesma cor somam antes de validar. qtd_pecas é só informativo e
+    não é decrementado. Levanta EstoqueInsuficiente (-> 409) se não cobrir.
+    """
+    tecido_row = conn.execute("SELECT id FROM estoque_tecidos WHERE nome_tecido = ? AND loja = ?", (tecido_nome, loja)).fetchone()
+    if not tecido_row:
+        raise EstoqueInsuficiente(f"Tipo de tecido '{tecido_nome}' não encontrado no estoque.")
+    tecido_id = tecido_row['id']
+
+    peso_por_cor = {}
+    for cor, peso in itens:
+        cor_nome = (cor or "").strip()
+        peso_pedido = peso or 0
+        if not cor_nome or peso_pedido <= 0: continue
+        peso_por_cor[cor_nome] = peso_por_cor.get(cor_nome, 0) + peso_pedido
+
+    for cor_nome, peso_pedido in peso_por_cor.items():
+        cor_row = conn.execute("SELECT id, peso_kg FROM estoque_cores WHERE tecido_id = ? AND nome_cor = ?", (tecido_id, cor_nome)).fetchone()
+        if not cor_row:
+            raise EstoqueInsuficiente(f"Cor '{cor_nome}' não encontrada no estoque de '{tecido_nome}'.")
+        if cor_row['peso_kg'] + 1e-9 < peso_pedido:
+            raise EstoqueInsuficiente(
+                f"Peso insuficiente para {tecido_nome} - cor {cor_nome}: "
+                f"pedido {round(peso_pedido, 3)} kg, disponível {round(cor_row['peso_kg'], 3)} kg."
+            )
+        # ROUND evita resíduo de ponto flutuante (ex.: 0,30000000004 kg).
+        conn.execute("UPDATE estoque_cores SET peso_kg = ROUND(peso_kg - ?, 3) WHERE id = ?", (peso_pedido, cor_row['id']))
+
+def _taxa_comissao(usuario):
+    """Taxa vigente do vendedor. O admin é o dono e não tira comissão de si mesmo."""
+    if not usuario or usuario.get("papel") == "admin":
+        return 0.0
+    return float(usuario.get("taxa_comissao") or 0)
+
 def current_loja():
     return (session.get("loja_codigo") or "").strip()
 
@@ -624,8 +661,10 @@ def pedidos_api():
         sort_by = request.args.get("sort", "data_desc")
         order_options = {"data_desc": "p.id DESC", "data_asc": "p.id ASC", "cliente_asc": "cliente_nome ASC, p.id DESC", "total_desc": "p.total DESC", "total_asc": "p.total ASC"}
         order_clause = order_options.get(sort_by, "p.id DESC")
-        sql = f"SELECT p.id, p.data_iso, p.tecido, p.total, p.desconto, p.comissao_valor, c.nome AS cliente_nome, COALESCE(u.nome, '') AS vendedor_nome FROM pedidos p JOIN clientes c ON c.id = p.cliente_id LEFT JOIN usuarios u ON u.id = p.usuario_id WHERE p.loja = ? ORDER BY {order_clause} LIMIT 200"
-        pedidos_raw = conn.execute(sql, (loja,)).fetchall()
+        # ?status=orcamento lista os orçamentos; o default são os pedidos.
+        status = "orcamento" if request.args.get("status") == "orcamento" else "pedido"
+        sql = f"SELECT p.id, p.data_iso, p.tecido, p.total, p.desconto, p.comissao_valor, p.status, c.nome AS cliente_nome, COALESCE(u.nome, '') AS vendedor_nome FROM pedidos p JOIN clientes c ON c.id = p.cliente_id LEFT JOIN usuarios u ON u.id = p.usuario_id WHERE p.loja = ? AND p.status = ? ORDER BY {order_clause} LIMIT 200"
+        pedidos_raw = conn.execute(sql, (loja, status)).fetchall()
         pedidos = [dict(p) for p in pedidos_raw]
         conn.close()
         return jsonify(pedidos)
@@ -639,6 +678,9 @@ def pedidos_api():
         preco_unitario = _ptbr_to_float(data.get("preco_unitario"))
         itens_in = data.get("itens") or []
         descontar_estoque = data.get("descontar_estoque", False)
+        # Orçamento: não baixa estoque e não congela comissão (fica 0 até a
+        # conversão em POST /pedidos/<id>/converter).
+        is_orcamento = data.get("is_orcamento") in (True, 1, "1", "true")
         tecido_nome = (data.get("tecido") or "").strip()
         # Fiado é só forma de pagamento: não muda baixa de estoque nem comissão.
         pago = 0 if data.get("pago", True) in (0, False, "0", "false", "False") else 1
@@ -657,47 +699,25 @@ def pedidos_api():
 
         # O vendedor é sempre o usuário logado; a comissão é congelada aqui
         # com a taxa vigente — mudanças futuras não afetam este pedido.
-        # O admin é o dono e não tira comissão de si mesmo: taxa 0, sempre.
         usuario_id = session.get("usuario_id")
-        vendedor = get_usuario_by_id(usuario_id)
-        comissao_taxa = 0.0 if vendedor.get("papel") == "admin" else float(vendedor.get("taxa_comissao") or 0)
-        comissao_valor = round(total * comissao_taxa / 100, 2)
-        
+        if is_orcamento:
+            comissao_taxa = comissao_valor = 0.0
+        else:
+            comissao_taxa = _taxa_comissao(get_usuario_by_id(usuario_id))
+            comissao_valor = round(total * comissao_taxa / 100, 2)
+        status = "orcamento" if is_orcamento else "pedido"
+
         try:
             conn.execute("BEGIN")
-            
-            if descontar_estoque:
-                tecido_row = conn.execute("SELECT id FROM estoque_tecidos WHERE nome_tecido = ? AND loja = ?", (tecido_nome, loja)).fetchone()
-                if not tecido_row:
-                    raise EstoqueInsuficiente(f"Tipo de tecido '{tecido_nome}' não encontrado no estoque.")
-                tecido_id = tecido_row['id']
 
-                # A baixa é POR PESO: a venda sai do total (kg) da cor. Várias
-                # linhas da mesma cor somam antes de validar. qtd_pecas é só
-                # informativo e não é mais decrementado aqui.
-                peso_por_cor = {}
-                for item in itens_in:
-                    cor_nome = (item.get("cor") or "").strip()
-                    peso_pedido = _ptbr_to_float(item.get("peso", 0))
-                    if not cor_nome or peso_pedido <= 0: continue
-                    peso_por_cor[cor_nome] = peso_por_cor.get(cor_nome, 0) + peso_pedido
-
-                for cor_nome, peso_pedido in peso_por_cor.items():
-                    cor_row = conn.execute("SELECT id, peso_kg FROM estoque_cores WHERE tecido_id = ? AND nome_cor = ?", (tecido_id, cor_nome)).fetchone()
-                    if not cor_row:
-                        raise EstoqueInsuficiente(f"Cor '{cor_nome}' não encontrada no estoque de '{tecido_nome}'.")
-                    if cor_row['peso_kg'] + 1e-9 < peso_pedido:
-                        raise EstoqueInsuficiente(
-                            f"Peso insuficiente para {tecido_nome} - cor {cor_nome}: "
-                            f"pedido {round(peso_pedido, 3)} kg, disponível {round(cor_row['peso_kg'], 3)} kg."
-                        )
-                    # ROUND evita resíduo de ponto flutuante (ex.: 0,30000000004 kg).
-                    conn.execute("UPDATE estoque_cores SET peso_kg = ROUND(peso_kg - ?, 3) WHERE id = ?", (peso_pedido, cor_row['id']))
+            if descontar_estoque and not is_orcamento:
+                _baixar_estoque(conn, loja, tecido_nome,
+                                [(it.get("cor"), _ptbr_to_float(it.get("peso", 0))) for it in itens_in])
 
             now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
             cur_pedido = conn.execute(
-                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor, pago) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, usuario_id, comissao_taxa, comissao_valor, pago)
+                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor, pago, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, usuario_id, comissao_taxa, comissao_valor, pago, status)
             )
             pedido_id = cur_pedido.lastrowid
 
@@ -714,7 +734,57 @@ def pedidos_api():
         finally:
             conn.close()
 
-        return jsonify(id=pedido_id, total=total), 201
+        return jsonify(id=pedido_id, total=total, status=status), 201
+
+@app.post("/pedidos/<int:pedido_id>/converter")
+@require_login
+@require_perm("vender")
+def pedido_converter_api(pedido_id: int):
+    """Orçamento -> pedido: baixa o estoque (mesma validação por peso) e
+    congela a comissão pela taxa ATUAL de quem fez o orçamento."""
+    loja = current_loja()
+    conn = get_conn()
+    try:
+        # IMMEDIATE: trava a escrita já na leitura, para duas conversões
+        # simultâneas não baixarem o estoque duas vezes.
+        conn.execute("BEGIN IMMEDIATE")
+        pedido = conn.execute(
+            "SELECT id, tecido, total, usuario_id, status FROM pedidos WHERE id = ? AND loja = ?",
+            (pedido_id, loja),
+        ).fetchone()
+        if not pedido:
+            conn.rollback()
+            return jsonify(error="Orçamento não encontrado."), 404
+        if pedido["status"] != "orcamento":
+            conn.rollback()
+            return jsonify(error="Este pedido já foi convertido."), 409
+
+        itens = conn.execute("SELECT cor, peso_kg FROM itens_pedido WHERE pedido_id = ?", (pedido_id,)).fetchall()
+        _baixar_estoque(conn, loja, pedido["tecido"], [(i["cor"], i["peso_kg"]) for i in itens])
+
+        vendedor = get_usuario_by_id(pedido["usuario_id"]) if pedido["usuario_id"] else None
+        comissao_taxa = _taxa_comissao(vendedor)
+        comissao_valor = round((pedido["total"] or 0) * comissao_taxa / 100, 2)
+        # A venda acontece na conversão: data_iso passa a ser agora, para o
+        # pedido cair no período certo dos relatórios.
+        now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
+        cur = conn.execute(
+            "UPDATE pedidos SET status = 'pedido', comissao_taxa = ?, comissao_valor = ?, data_iso = ? "
+            "WHERE id = ? AND loja = ? AND status = 'orcamento'",
+            (comissao_taxa, comissao_valor, now_iso, pedido_id, loja),
+        )
+        if cur.rowcount != 1:
+            raise EstoqueInsuficiente("Este pedido já foi convertido.")
+        conn.commit()
+    except EstoqueInsuficiente as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 409
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+    return jsonify(ok=True, id=pedido_id, status="pedido", comissao_valor=comissao_valor)
 
 @app.route("/pedidos/<int:pedido_id>", methods=["GET", "PUT", "DELETE"])
 @require_login
@@ -793,13 +863,17 @@ def get_estoque():
     estoque = []
     for tecido in tecidos_raw:
         cores = conn.execute(
-            "SELECT id, nome_cor, peso_kg, qtd_pecas FROM estoque_cores WHERE tecido_id = ? ORDER BY nome_cor",
+            "SELECT id, nome_cor, peso_kg, qtd_pecas, estoque_minimo FROM estoque_cores WHERE tecido_id = ? ORDER BY nome_cor",
             (tecido['id'],)
         ).fetchall()
         estoque.append({
             "id": tecido['id'],
             "nome_tecido": tecido['nome_tecido'],
-            "cores": [dict(c) for c in cores]
+            # Alerta só quando há mínimo definido (> 0) e o peso chegou nele.
+            "cores": [
+                {**dict(c), "abaixo_minimo": c['estoque_minimo'] > 0 and c['peso_kg'] <= c['estoque_minimo']}
+                for c in cores
+            ]
         })
     conn.close()
     return jsonify(estoque)
@@ -920,6 +994,31 @@ def update_cor_estoque(cor_id):
             
         conn.commit()
         return jsonify(ok=True, message="Estoque ajustado com sucesso.")
+    except sqlite3.Error as e:
+        conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+
+@app.put("/api/estoque/cores/<int:cor_id>/minimo")
+@require_login
+@require_perm("estoque_mutar")
+def update_cor_minimo(cor_id):
+    loja = current_loja()
+    data = request.get_json(silent=True) or {}
+    minimo = _peso_to_float(data.get("estoque_minimo"))
+    if minimo is None or minimo < 0:
+        return jsonify(error="Estoque mínimo é obrigatório e não pode ser negativo (0 desliga o alerta)."), 400
+
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE estoque_cores SET estoque_minimo = ? WHERE id = ? AND tecido_id IN (SELECT id FROM estoque_tecidos WHERE loja = ?)",
+            (minimo, cor_id, loja)
+        )
+        if cur.rowcount == 0:
+            return jsonify(error="Cor não encontrada no estoque."), 404
+        conn.commit()
+        return jsonify(ok=True, estoque_minimo=minimo)
     except sqlite3.Error as e:
         conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
     finally:
@@ -1437,7 +1536,7 @@ def relatorio_loja():
     try:
         tot = conn.execute(
             "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat "
-            "FROM pedidos WHERE loja = ? AND data_iso >= ? AND data_iso < ?",
+            "FROM pedidos WHERE loja = ? AND status = 'pedido' AND data_iso >= ? AND data_iso < ?",
             (loja, de, ate_ex),
         ).fetchone()
         num_pedidos = tot["n"]
@@ -1449,7 +1548,7 @@ def relatorio_loja():
             conn.execute(
                 "SELECT COALESCE(SUM(p.comissao_valor), 0) AS com FROM pedidos p "
                 "LEFT JOIN usuarios u ON u.id = p.usuario_id "
-                "WHERE p.loja = ? AND p.data_iso >= ? AND p.data_iso < ? "
+                "WHERE p.loja = ? AND p.status = 'pedido' AND p.data_iso >= ? AND p.data_iso < ? "
                 "AND COALESCE(u.papel, '') != 'admin'",
                 (loja, de, ate_ex),
             ).fetchone()["com"],
@@ -1468,7 +1567,7 @@ def relatorio_loja():
                 "SELECT p.usuario_id, COALESCE(u.nome, '') AS nome, COUNT(*) AS num_pedidos, "
                 "COALESCE(SUM(p.total), 0) AS faturamento, COALESCE(SUM(p.comissao_valor), 0) AS comissao "
                 "FROM pedidos p LEFT JOIN usuarios u ON u.id = p.usuario_id "
-                "WHERE p.loja = ? AND p.data_iso >= ? AND p.data_iso < ? "
+                "WHERE p.loja = ? AND p.status = 'pedido' AND p.data_iso >= ? AND p.data_iso < ? "
                 "GROUP BY p.usuario_id ORDER BY faturamento DESC",
                 (loja, de, ate_ex),
             ).fetchall()
@@ -1484,10 +1583,10 @@ def relatorio_loja():
                 "SELECT p.tecido, COALESCE(SUM(p.total), 0) AS faturamento, "
                 "COALESCE((SELECT SUM(i.peso_kg) FROM itens_pedido i "
                 "          JOIN pedidos p2 ON p2.id = i.pedido_id "
-                "          WHERE p2.loja = ? AND p2.tecido = p.tecido "
+                "          WHERE p2.loja = ? AND p2.status = 'pedido' AND p2.tecido = p.tecido "
                 "            AND p2.data_iso >= ? AND p2.data_iso < ?), 0) AS peso_total "
                 "FROM pedidos p "
-                "WHERE p.loja = ? AND p.data_iso >= ? AND p.data_iso < ? "
+                "WHERE p.loja = ? AND p.status = 'pedido' AND p.data_iso >= ? AND p.data_iso < ? "
                 "GROUP BY p.tecido ORDER BY faturamento DESC",
                 (loja, de, ate_ex, loja, de, ate_ex),
             ).fetchall()
@@ -1499,7 +1598,7 @@ def relatorio_loja():
                 "SELECT nome_tecido FROM estoque_tecidos "
                 "WHERE loja = ? AND nome_tecido NOT IN ("
                 "  SELECT DISTINCT tecido FROM pedidos "
-                "  WHERE loja = ? AND data_iso >= ? AND data_iso < ? AND tecido IS NOT NULL"
+                "  WHERE loja = ? AND status = 'pedido' AND data_iso >= ? AND data_iso < ? AND tecido IS NOT NULL"
                 ") ORDER BY nome_tecido",
                 (loja, loja, de, ate_ex),
             ).fetchall()
@@ -1539,7 +1638,7 @@ def relatorio_meu():
     try:
         tot = conn.execute(
             "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat, COALESCE(SUM(comissao_valor), 0) AS com "
-            "FROM pedidos WHERE loja = ? AND usuario_id = ? AND data_iso >= ? AND data_iso < ?",
+            "FROM pedidos WHERE loja = ? AND usuario_id = ? AND status = 'pedido' AND data_iso >= ? AND data_iso < ?",
             (loja, usuario_id, de, ate_ex),
         ).fetchone()
         ultimos = [
@@ -1553,7 +1652,7 @@ def relatorio_meu():
             for r in conn.execute(
                 "SELECT p.id, p.data_iso, COALESCE(c.nome, '') AS cliente_nome, p.total, p.comissao_valor "
                 "FROM pedidos p LEFT JOIN clientes c ON c.id = p.cliente_id "
-                "WHERE p.loja = ? AND p.usuario_id = ? AND p.data_iso >= ? AND p.data_iso < ? "
+                "WHERE p.loja = ? AND p.usuario_id = ? AND p.status = 'pedido' AND p.data_iso >= ? AND p.data_iso < ? "
                 "ORDER BY p.id DESC LIMIT 10",
                 (loja, usuario_id, de, ate_ex),
             ).fetchall()
