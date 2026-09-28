@@ -279,8 +279,8 @@ def init_db() -> None:
 
     # Colunas novas em tabelas que já existem: CREATE TABLE IF NOT EXISTS não
     # altera um banco antigo, então elas entram via ALTER quando faltarem.
-    # Orçamento ('orcamento') não baixa estoque nem conta em relatório até
-    # virar 'pedido'.
+    # status é legado (o orçamento foi aposentado): todo pedido nasce
+    # 'pedido' e nenhuma rota filtra por ele. Fica só para não migrar.
     _garantir_coluna(cur, "pedidos", "status",
                      "TEXT NOT NULL DEFAULT 'pedido' CHECK(status IN ('orcamento','pedido'))")
     # Alerta de estoque: 0 = sem mínimo definido (nunca alerta).
@@ -290,9 +290,12 @@ def init_db() -> None:
     _garantir_coluna(cur, "despesas", "recorrente_id",
                      "INTEGER REFERENCES despesas_recorrentes(id) ON DELETE SET NULL")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_despesas_recorrente ON despesas(recorrente_id)")
-    # Intenção de baixa gravada no pedido/orçamento: um orçamento de venda
-    # casada (tecido não rastreado) nasce com 0 para a conversão não baixar.
+    # Se o pedido baixou estoque (0 = tecido "Outro", fora do estoque, ou
+    # checkbox desmarcado).
     _garantir_coluna(cur, "pedidos", "descontar_estoque", "INTEGER NOT NULL DEFAULT 1")
+    # Nome digitado na venda quando o comprador não é cliente cadastrado
+    # (cliente_id NULL). Venda fiado exige cliente cadastrado.
+    _garantir_coluna(cur, "pedidos", "cliente_avulso", "TEXT")
 
     conn.commit()
     conn.close()
@@ -351,8 +354,8 @@ def get_pedido(pedido_id: int) -> Optional[Dict[str, Any]]:
         SELECT
             p.id, p.data_iso, p.tecido, p.quantidade, p.preco_unitario, p.total, p.desconto,
             p.loja AS loja_codigo, p.cliente_id, p.usuario_id,
-            p.comissao_taxa, p.comissao_valor, p.status,
-            COALESCE(c.nome, '') AS cliente_nome,
+            p.comissao_taxa, p.comissao_valor, p.pago, p.cliente_avulso,
+            COALESCE(c.nome, p.cliente_avulso, '') AS cliente_nome,
             COALESCE(c.telefone, '') AS cliente_telefone,
             COALESCE(u.nome, '') AS vendedor_nome,
             COALESCE(l.nome, p.loja) AS loja_nome,
