@@ -1,8 +1,10 @@
 # Fixtures compartilhadas da suíte: os testes rodam contra um Postgres de
-# TESTE (TEST_DATABASE_URL) e cada teste começa com o schema recriado do zero.
+# TESTE (TEST_DATABASE_URL) e cada teste começa com o banco zerado.
 #
-# ATENÇÃO: o banco apontado por TEST_DATABASE_URL é APAGADO a cada teste
-# (DROP SCHEMA public CASCADE). Nunca aponte para o banco de dev/produção.
+# ATENÇÃO: o banco apontado por TEST_DATABASE_URL é APAGADO entre os testes
+# (TRUNCATE de todas as tabelas; o schema em si só é (re)criado uma vez por
+# sessão, ou quando um teste pede o banco sem schema). Nunca aponte para o
+# banco de dev/produção.
 import os
 import sys
 from pathlib import Path
@@ -46,14 +48,43 @@ def resetar_banco():
     database.init_db()
 
 
+def truncar_todas_tabelas():
+    """TRUNCATE de todas as tabelas do schema public (RESTART IDENTITY CASCADE).
+
+    Bem mais rápido que recriar o schema do zero a cada teste, mas depende de
+    a estrutura já existir — por isso o schema é criado uma vez por sessão
+    (fixture `_schema_da_sessao`) em vez de a cada teste.
+    """
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+        tabelas = [r[0] for r in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+        ).fetchall()]
+        if tabelas:
+            nomes = ", ".join(f'"{t}"' for t in tabelas)
+            conn.execute(f"TRUNCATE TABLE {nomes} RESTART IDENTITY CASCADE")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _schema_da_sessao():
+    """Cria o schema (via init_db()) uma única vez por sessão de testes."""
+    resetar_banco()
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _banco_limpo():
-    resetar_banco()
+    truncar_todas_tabelas()
     yield
 
 
 @pytest.fixture()
 def banco_sem_schema():
-    """Banco vazio SEM init_db(): para testes que montam um schema antigo à mão."""
+    """Banco vazio SEM init_db(): para testes que montam um schema antigo à mão.
+
+    Ao fim do teste o schema completo é recriado: esse teste monta tabelas com
+    colunas faltando de propósito, e deixá-las assim corromperia o TRUNCATE
+    dos testes seguintes (colunas que a aplicação espera não existiriam mais).
+    """
     limpar_schema()
     yield
+    resetar_banco()

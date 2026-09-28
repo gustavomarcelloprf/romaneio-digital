@@ -148,6 +148,68 @@ def test_admin_nao_consegue_se_autodesativar(ctx):
     assert admin["ativo"] == 1
 
 
+def test_admin_regenera_convite_de_operador_pendente(ctx):
+    resp = ctx["admin"].post(
+        "/usuarios", json={"nome": "Operador Um", "login": "pendente", "taxa_comissao": "5"}
+    )
+    assert resp.status_code == 201
+    op_id = resp.get_json()["id"]
+
+    resp = ctx["admin"].post(f"/usuarios/{op_id}/reconvite")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["convite_path"].startswith("/convite/")
+
+    conn = database.get_conn()
+    row = conn.execute(
+        "SELECT convite_token, convite_expira FROM usuarios WHERE id=%s", (op_id,)
+    ).fetchone()
+    conn.close()
+    assert row["convite_token"] == body["convite_token"]
+    assert row["convite_expira"] == body["convite_expira"]
+
+    # O novo link funciona para definir a senha.
+    aceite = app.test_client().post(body["convite_path"], json={"senha": SENHA})
+    assert aceite.status_code == 200
+
+
+def test_admin_regenera_convite_troca_o_token_anterior(ctx):
+    resp = ctx["admin"].post(
+        "/usuarios", json={"nome": "Operador Dois", "login": "pendente2", "taxa_comissao": "5"}
+    )
+    assert resp.status_code == 201
+    op_id = resp.get_json()["id"]
+    token_antigo = resp.get_json()["convite_token"]
+
+    resp = ctx["admin"].post(f"/usuarios/{op_id}/reconvite")
+    assert resp.status_code == 200
+    token_novo = resp.get_json()["convite_token"]
+    assert token_novo != token_antigo
+
+    # O link antigo não funciona mais.
+    resp = app.test_client().post(f"/convite/{token_antigo}", json={"senha": SENHA})
+    assert resp.status_code == 404
+
+
+def test_admin_nao_regenera_convite_de_quem_ja_tem_senha(ctx):
+    op_id = _criar_operador(ctx["admin"], login="comsenha").get_json()["id"]
+
+    resp = ctx["admin"].post(f"/usuarios/{op_id}/reconvite")
+    assert resp.status_code == 400
+
+
+def test_reconvite_de_usuario_inexistente_retorna_404(ctx):
+    resp = ctx["admin"].post("/usuarios/99999/reconvite")
+    assert resp.status_code == 404
+
+
+def test_operador_recebe_403_ao_tentar_reconvite(ctx):
+    _criar_operador(ctx["admin"])
+    op = _login_operador()
+    resp = op.post(f"/usuarios/{ctx['admin_id']}/reconvite")
+    assert resp.status_code == 403
+
+
 def test_admin_desativa_operador(ctx):
     op_id = _criar_operador(ctx["admin"]).get_json()["id"]
     resp = ctx["admin"].put(f"/usuarios/{op_id}", json={"ativo": 0})

@@ -106,3 +106,55 @@ def test_admin_token_errado_retorna_403(client):
 def test_admin_token_correto_retorna_200(client):
     resp = client.get("/admin/lojas", headers={"Authorization": TEST_ADMIN_TOKEN})
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Admin: aprovar/revogar/reativar loja — 404 quando a loja não existe (o
+# UPDATE afeta 0 linhas), mesma checagem que /admin/deletar-loja já faz.
+# ---------------------------------------------------------------------------
+def test_admin_aprovar_loja_inexistente_retorna_404(client):
+    resp = client.post(
+        "/admin/aprovar-loja/NaoExiste", headers={"Authorization": TEST_ADMIN_TOKEN}
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "Loja não encontrada."
+
+
+def test_admin_revogar_loja_inexistente_retorna_404(client):
+    resp = client.post(
+        "/admin/revogar-loja/NaoExiste", headers={"Authorization": TEST_ADMIN_TOKEN}
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "Loja não encontrada."
+
+
+def test_admin_reativar_loja_inexistente_retorna_404(client):
+    resp = client.post(
+        "/admin/reativar-loja/NaoExiste", headers={"Authorization": TEST_ADMIN_TOKEN}
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "Loja não encontrada."
+
+
+def test_admin_aprovar_revogar_reativar_loja_existente_retorna_200(client):
+    codigo = "LojaAdminFluxo"
+    resp = client.post(
+        "/auth/signup",
+        json={"nome_loja": codigo, "nome": "Dona", "login": "admin", "senha": "s3nh4-forte"},
+    )
+    assert resp.status_code == 201
+
+    resp = client.post(
+        f"/admin/aprovar-loja/{codigo}", headers={"Authorization": TEST_ADMIN_TOKEN}
+    )
+    assert resp.status_code == 200
+
+    resp = client.post(
+        f"/admin/revogar-loja/{codigo}", headers={"Authorization": TEST_ADMIN_TOKEN}
+    )
+    assert resp.status_code == 200
+
+    resp = client.post(
+        f"/admin/reativar-loja/{codigo}", headers={"Authorization": TEST_ADMIN_TOKEN}
+    )
+    assert resp.status_code == 200

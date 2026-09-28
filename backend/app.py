@@ -656,6 +656,41 @@ def usuario_update_api(usuario_id: int):
     finally:
         conn.close()
 
+@app.post("/usuarios/<int:usuario_id>/reconvite")
+@require_login
+@require_perm("usuarios_gerir")
+def usuario_reconvite_api(usuario_id: int):
+    loja = current_loja()
+    conn = get_conn()
+    try:
+        alvo = conn.execute(
+            "SELECT id, senha_hash FROM usuarios WHERE id = %s AND loja = %s",
+            (usuario_id, loja),
+        ).fetchone()
+        if not alvo:
+            return jsonify(error="Usuário não encontrado."), 404
+        # Já tem senha definida: não há convite pendente para regerar.
+        if alvo["senha_hash"] is not None:
+            return jsonify(error="Usuário já definiu senha; não há convite pendente para regerar."), 400
+        token, expira = _novo_convite()
+        conn.execute(
+            "UPDATE usuarios SET convite_token = %s, convite_expira = %s WHERE id = %s AND loja = %s",
+            (token, expira, usuario_id, loja),
+        )
+        conn.commit()
+        convite_path = f"/convite/{token}"
+        return jsonify(
+            ok=True,
+            convite_token=token,
+            convite_path=convite_path,
+            convite_url=request.host_url.rstrip("/") + convite_path,
+            convite_expira=expira,
+        )
+    except psycopg.Error as e:
+        conn.rollback(); return jsonify(error=f"Erro de banco de dados: {e}"), 500
+    finally:
+        conn.close()
+
 # -----------------------------------------------------------------------------
 # API: Pedidos com Lógica de Estoque
 # -----------------------------------------------------------------------------
@@ -1538,7 +1573,9 @@ def relatorio_loja():
     loja = current_loja()
     # Comissão é DESPESA do dono, não receita da loja: só o admin enxerga
     # o quanto tem a pagar. O gerente vê o desempenho sem esse número.
-    ve_comissoes = pode("relatorio_comissoes")
+    # Mesma permissão das rotas de despesa (despesas_gerir), já que esses
+    # números (despesas/lucro/comissões) são o mesmo dado financeiro.
+    ve_comissoes = pode("despesas_gerir")
     de, ate, ate_ex = _periodo_from_args()
     conn = get_conn()
     try:
@@ -2160,7 +2197,9 @@ def admin_get_todas_lojas():
 @require_admin
 def admin_aprovar_loja(codigo_loja):
     conn = get_conn()
-    conn.execute("UPDATE lojas SET status = 'aprovado' WHERE codigo = %s", (codigo_loja,))
+    cur = conn.execute("UPDATE lojas SET status = 'aprovado' WHERE codigo = %s", (codigo_loja,))
+    if cur.rowcount == 0:
+        conn.close(); return jsonify(error="Loja não encontrada."), 404
     conn.commit(); conn.close()
     return jsonify(ok=True, message=f"Loja {codigo_loja} aprovada.")
 
@@ -2168,7 +2207,9 @@ def admin_aprovar_loja(codigo_loja):
 @require_admin
 def admin_revogar_loja(codigo_loja):
     conn = get_conn()
-    conn.execute("UPDATE lojas SET status = 'revogado' WHERE codigo = %s", (codigo_loja,))
+    cur = conn.execute("UPDATE lojas SET status = 'revogado' WHERE codigo = %s", (codigo_loja,))
+    if cur.rowcount == 0:
+        conn.close(); return jsonify(error="Loja não encontrada."), 404
     conn.commit(); conn.close()
     return jsonify(ok=True, message=f"Acesso da loja {codigo_loja} foi revogado.")
 
@@ -2176,7 +2217,9 @@ def admin_revogar_loja(codigo_loja):
 @require_admin
 def admin_reativar_loja(codigo_loja):
     conn = get_conn()
-    conn.execute("UPDATE lojas SET status = 'aprovado' WHERE codigo = %s", (codigo_loja,))
+    cur = conn.execute("UPDATE lojas SET status = 'aprovado' WHERE codigo = %s", (codigo_loja,))
+    if cur.rowcount == 0:
+        conn.close(); return jsonify(error="Loja não encontrada."), 404
     conn.commit(); conn.close()
     return jsonify(ok=True, message=f"Acesso da loja {codigo_loja} foi reativado.")
 

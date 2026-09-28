@@ -597,6 +597,7 @@
                             <td>${u.ativo ? (u.convite_pendente ? '<span class="muted">Convite pendente</span>' : 'Ativo') : '<span class="muted">Inativo</span>'}</td>
                             <td class="actions">
                                 <button class="btn-secondary btn-sm edit-usuario-btn" data-id="${esc(u.id)}" data-nome="${esc(u.nome)}" data-taxa="${esc(u.taxa_comissao)}">Editar taxa</button>
+                                ${u.ativo && u.convite_pendente ? `<button class="btn-secondary btn-sm reconvite-usuario-btn" data-id="${esc(u.id)}" data-nome="${esc(u.nome)}">Gerar novo link</button>` : ''}
                                 <button class="btn-secondary btn-sm toggle-usuario-btn ${u.ativo ? 'btn-danger' : ''}" data-id="${esc(u.id)}" data-ativo="${u.ativo ? 1 : 0}">${u.ativo ? 'Desativar' : 'Ativar'}</button>
                             </td>
                         </tr>
@@ -1378,6 +1379,13 @@
                 if (!ativar && !confirm('Desativar este usuário? Ele não conseguirá mais entrar no sistema.')) return;
                 try {
                     await jfetch(`/usuarios/${usuarioId}`, { method: 'PUT', body: JSON.stringify({ ativo: ativar ? 1 : 0 }) });
+                    loadUsuarios();
+                } catch (err) { alert(`Erro: ${err.message}`); }
+            } else if (btn.classList.contains('reconvite-usuario-btn')) {
+                if (!confirm(`Gerar um novo link de convite para "${btn.dataset.nome}"? O link anterior deixará de funcionar.`)) return;
+                try {
+                    const criado = await jfetch(`/usuarios/${usuarioId}/reconvite`, { method: 'POST' });
+                    mostrarConvite({ ...criado, nome: btn.dataset.nome });
                     loadUsuarios();
                 } catch (err) { alert(`Erro: ${err.message}`); }
             }
