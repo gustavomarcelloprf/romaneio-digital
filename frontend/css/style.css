@@ -281,18 +281,62 @@ button {
 .msg.erro { color: #dc2626; }
 .msg.ok { color: #15803d; }
 
-/* Aviso de venda salva: fica na tela Vender com os atalhos do romaneio. */
-.venda-sucesso {
-  border: 1px solid #86efac;
-  background: #f0fdf4;
-  color: #14532d;
+/* ====== Vender: pedidos recentes (cartões, pensados para o celular) ====== */
+/* Com a lista logo abaixo, o rodapé de total não encosta mais na borda do card. */
+#formPedido .totals-card {
+  margin: 16px 0 0;
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 12px 16px;
-  margin: 0 0 16px;
 }
-.venda-sucesso p { margin: 0 0 8px; font-weight: 600; }
-.venda-sucesso .item-row { margin-top: 0; }
-.venda-sucesso button { width: auto; }
+.recentes { margin-top: 8px; }
+.recentes h3 { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.recentes h3 small { font-size: 13px; font-weight: 400; }
+.recentes-lista {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+@media (min-width: 700px) {
+  .recentes-lista { grid-template-columns: 1fr 1fr; }
+}
+.recentes-vazio { padding: 12px 0; }
+.recente-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.recente-topo { display: flex; align-items: center; gap: 8px; }
+.recente-num { font-weight: 700; }
+.recente-hora { color: var(--muted); font-size: 13px; }
+.recente-total { margin-left: auto; font-size: 17px; white-space: nowrap; }
+.recente-info { color: var(--muted); overflow-wrap: anywhere; }
+.recente-acoes { display: flex; gap: 8px; }
+.recente-acoes button { flex: 1; min-height: 44px; }
+.romaneio-btn.is-pronto { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.tag-status {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.tag-status.is-pago { color: #166534; background: #dcfce7; }
+.tag-status.is-fiado { color: #92400e; background: #fef3c7; }
+/* Venda recém-salva: destaque que some sozinho. */
+.recente-card.is-nova { border-color: #86efac; animation: recente-destaque 3s ease-out; }
+@keyframes recente-destaque {
+  from { background: #dcfce7; }
+  to { background: #fff; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .recente-card.is-nova { animation: none; background: #f0fdf4; }
+}
 
 /* Itens e Totais */
 .item-row {
