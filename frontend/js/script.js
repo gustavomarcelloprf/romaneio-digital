@@ -15,6 +15,13 @@
         me: null,
         permissoes: {},
         periodo: "30d",
+        // Intervalo personalizado do Dashboard (periodo === "custom").
+        periodoDe: "",
+        periodoAte: "",
+        dashUsuarioId: "",
+        tecidoMetrica: "faturamento",
+        ultimoRelLoja: null,
+        relSeq: 0,
         saidasAberto: false,
         recorrentes: [],
         recentes: [],
@@ -137,6 +144,7 @@
             case '7d': { const d = new Date(hoje); d.setDate(d.getDate() - 7); de = isoDate(d); break; }
             case 'mes': de = `${ate.slice(0, 7)}-01`; break;
             case 'tudo': de = '1970-01-01'; break;
+            case 'custom': return `de=${state.periodoDe}&ate=${state.periodoAte}`;
             default: { const d = new Date(hoje); d.setDate(d.getDate() - 30); de = isoDate(d); break; }
         }
         return `de=${de}&ate=${ate}`;
@@ -494,29 +502,6 @@
         return `<div class="stat-card"><span class="stat-label">${esc(label)}</span><span class="stat-value ${esc(extraClass)}">${esc(value)}</span></div>`;
     }
 
-    // Barra proporcional feita só com divs/CSS (sem libs de gráfico).
-    function barCell(valor, maximo) {
-        const pct = maximo > 0 ? Math.max(2, Math.round((valor / maximo) * 100)) : 0;
-        return `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>`;
-    }
-
-    function tabelaTecidos(lista) {
-        if (!lista.length) return '<p class="muted" style="padding:12px;">Nenhuma venda no período.</p>';
-        const max = Math.max(...lista.map(t => t.faturamento || 0));
-        return `
-            <table class="table">
-                <thead><tr><th>Tecido</th><th>Faturamento</th><th>Peso (kg)</th><th></th></tr></thead>
-                <tbody>${lista.map(t => `
-                    <tr>
-                        <td>${esc(t.tecido)}</td>
-                        <td>${fmtBRL(t.faturamento)}</td>
-                        <td>${esc(numberToPtbr(t.peso_total))}</td>
-                        <td>${barCell(t.faturamento || 0, max)}</td>
-                    </tr>`).join('')}
-                </tbody>
-            </table>`;
-    }
-
     // Saídas = despesas + comissões. O card é um botão que abre/fecha o
     // detalhe; o estado aberto sobrevive à troca de período.
     function saidasCard(total) {
@@ -544,52 +529,288 @@
             </table>`;
     }
 
-    function renderDashboardLoja(rel) {
-        // Comissão é o que a loja tem A PAGAR, e só o dono (admin) vê esse
-        // número: o backend simplesmente não manda o campo para o gerente.
+    // --- Dashboard da loja: KPIs com comparação, gráficos e listas ---
+    // Os gráficos usam o Chart.js servido localmente (js/chart.min.js). Se o
+    // arquivo não carregar, os KPIs e as listas continuam funcionando.
+    const charts = {};
+    const COR_BARRA = '#2563eb';
+    const COR_BARRA_HOVER = '#1d4ed8';
+    const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+
+    function fmtCompacto(v) {
+        return (v || 0).toLocaleString('pt-BR', { notation: 'compact', maximumFractionDigits: 1 });
+    }
+
+    function fmtKg(v) {
+        return `${(v || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} kg`;
+    }
+
+    // "+12% vs. período anterior". Sem base de comparação (anterior zerado
+    // ou atalho "Tudo") não inventa porcentagem. Em custos (comissões),
+    // subir não é "bom": a seta fica neutra.
+    function deltaHtml(atual, anterior, { custo = false, curto = false } = {}) {
+        if (state.periodo === 'tudo' || anterior === undefined) return '';
+        if (!anterior) {
+            return atual ? '<span class="kpi-delta">sem base no período anterior</span>' : '';
+        }
+        const pct = Math.round(((atual - anterior) / Math.abs(anterior)) * 100);
+        if (pct === 0) return `<span class="kpi-delta">= igual${curto ? '' : ' ao período anterior'}</span>`;
+        const sobe = pct > 0;
+        const tom = custo ? '' : (sobe ? ' is-up' : ' is-down');
+        // Nos cartões pequenos cabe só o número; o texto completo vai no title.
+        return `<span class="kpi-delta${tom}" title="vs. período anterior">${sobe ? '▲ +' : '▼ '}${esc(pct)}%${curto ? '' : ' vs. período anterior'}</span>`;
+    }
+
+    function kpiCard(label, valor, delta, { cls = '', valorCls = '', hint = '' } = {}) {
+        return `<div class="kpi-card ${esc(cls)}">
+            <span class="kpi-label">${esc(label)}</span>
+            <span class="kpi-valor ${esc(valorCls)}">${esc(valor)}</span>
+            ${hint ? `<span class="kpi-hint">${esc(hint)}</span>` : ''}${delta}</div>`;
+    }
+
+    function renderPeriodoInfo(rel) {
+        const info = $("#dashPeriodoInfo");
+        if (!info) return;
+        const p = rel.periodo || {};
+        const ant = rel.periodo_anterior || {};
+        const partes = [state.periodo === 'tudo'
+            ? 'Todo o período'
+            : `${fmtDataCurta(p.de)} a ${fmtDataCurta(p.ate)}`];
+        if (state.periodo !== 'tudo' && ant.de) {
+            partes.push(`comparado com ${fmtDataCurta(ant.de)} a ${fmtDataCurta(ant.ate)}`);
+        }
+        const op = (rel.operadores || []).find(o => o.usuario_id === rel.usuario_id);
+        if (op) partes.push(`só ${op.nome || 'operador sem nome'}`);
+        info.textContent = partes.join(' · ');
+    }
+
+    function renderKpis(rel) {
+        const ant = rel.periodo_anterior || {};
         const veComissoes = rel.comissoes_a_pagar !== undefined;
-        // Despesas e lucro seguem a mesma regra: só chegam para o admin.
         const veLucro = rel.lucro !== undefined;
+        const filtrado = rel.usuario_id != null;
+        const kpis = $("#dashKpis");
+        if (kpis) {
+            kpis.innerHTML =
+                kpiCard("Faturamento", fmtBRL(rel.faturamento_total),
+                    deltaHtml(rel.faturamento_total, ant.faturamento_total), { cls: 'kpi-destaque' }) +
+                (veLucro ? kpiCard("Lucro", fmtBRL(rel.lucro), deltaHtml(rel.lucro, ant.lucro), {
+                    valorCls: rel.lucro < 0 ? 'is-negativo' : '',
+                    // Com filtro de operador o backend não desconta as despesas da loja.
+                    hint: filtrado ? 'venda − comissão (sem despesas da loja)' : '',
+                }) : '') +
+                (veComissoes ? kpiCard("Comissões a pagar", fmtBRL(rel.comissoes_a_pagar),
+                    deltaHtml(rel.comissoes_a_pagar, ant.comissoes_a_pagar, { custo: true })) : '');
+        }
         const cards = $("#dashCards");
         if (cards) {
             cards.innerHTML =
-                statCard("Faturamento", fmtBRL(rel.faturamento_total)) +
-                statCard("Pedidos", rel.num_pedidos) +
-                statCard("Ticket médio", fmtBRL(rel.ticket_medio)) +
-                (veComissoes ? statCard("Comissões a pagar", fmtBRL(rel.comissoes_a_pagar)) : '') +
-                (veLucro ? saidasCard(rel.saidas_total) : '') +
-                (veLucro ? statCard("Lucro", fmtBRL(rel.lucro), rel.lucro < 0 ? 'is-negativo' : '') : '');
+                kpiCard("Ticket médio", fmtBRL(rel.ticket_medio),
+                    deltaHtml(rel.ticket_medio, ant.ticket_medio, { curto: true }), { cls: 'kpi-sec' }) +
+                kpiCard("Pedidos", String(rel.num_pedidos),
+                    deltaHtml(rel.num_pedidos, ant.num_pedidos, { curto: true }), { cls: 'kpi-sec' }) +
+                (veLucro ? saidasCard(rel.saidas_total) : '');
         }
         renderSaidasDetalhe(veLucro ? (rel.saidas_detalhe || []) : null);
-        const opWrap = $("#dashOperadoresWrap");
-        if (opWrap) {
-            const ops = rel.por_operador || [];
-            const max = Math.max(...ops.map(o => o.faturamento || 0), 0);
-            opWrap.innerHTML = ops.length ? `
-                <table class="table">
-                    <thead><tr><th>Operador</th><th>Pedidos</th><th>Faturamento</th>${veComissoes ? '<th>Comissão a pagar</th>' : ''}<th></th></tr></thead>
-                    <tbody>${ops.map(o => `
-                        <tr>
-                            <td>${esc(o.nome)}</td>
-                            <td>${esc(o.num_pedidos)}</td>
-                            <td>${fmtBRL(o.faturamento)}</td>
-                            ${veComissoes ? `<td>${fmtBRL(o.comissao)}</td>` : ''}
-                            <td>${barCell(o.faturamento || 0, max)}</td>
-                        </tr>`).join('')}
-                    </tbody>
-                </table>` : '<p class="muted" style="padding:12px;">Nenhum pedido no período.</p>';
+    }
+
+    // Mostra "Nenhuma venda no período." no lugar do gráfico.
+    function graficoVazio(canvasId, vazio) {
+        const box = document.getElementById(canvasId)?.parentElement;
+        if (box) {
+            box.classList.toggle('is-vazio', vazio);
+            box.dataset.msg = 'Nenhuma venda no período.';
         }
-        const maisWrap = $("#dashMaisWrap");
-        if (maisWrap) maisWrap.innerHTML = tabelaTecidos(rel.tecidos_mais_vendidos || []);
-        const menosWrap = $("#dashMenosWrap");
-        if (menosWrap) menosWrap.innerHTML = tabelaTecidos(rel.tecidos_menos_vendidos || []);
-        const encWrap = $("#dashEncalhadosWrap");
-        if (encWrap) {
-            const enc = rel.tecidos_encalhados || [];
-            encWrap.innerHTML = enc.length
-                ? `<div class="tag-list">${enc.map(t => `<span class="pill">${esc(t)}</span>`).join('')}</div>`
-                : '<p class="muted">Nenhum tecido encalhado: tudo em estoque vendeu no período.</p>';
+        if (vazio && charts[canvasId]) {
+            charts[canvasId].destroy();
+            delete charts[canvasId];
         }
+        return vazio || !box;
+    }
+
+    function desenhaBarras(canvasId, { rotulos, titulos, valores, horizontal = false, fmt, fmtEixo }) {
+        if (typeof Chart === 'undefined') return;
+        const canvas = document.getElementById(canvasId);
+        if (!canvas) return;
+        charts[canvasId]?.destroy();
+        const cinza = '#6b7280';
+        const eixoValor = {
+            beginAtZero: true,
+            grid: { color: '#eef0f3' },
+            border: { display: false },
+            // No celular, poucos rótulos no eixo de valores para não encavalar.
+            ticks: {
+                callback: v => fmtEixo(v),
+                maxTicksLimit: canvas.parentElement.clientWidth < 420 ? 3 : 5,
+                color: cinza,
+                font: { size: 11 },
+            },
+        };
+        const eixoCategoria = {
+            grid: { display: false },
+            border: { display: false },
+            ticks: {
+                color: '#374151',
+                font: { size: 11 },
+                maxRotation: 0,
+                autoSkip: true,
+                autoSkipPadding: 8,
+                // Nome longo de tecido não pode espremer o gráfico no celular.
+                callback(v) {
+                    const s = String(this.getLabelForValue(v));
+                    return s.length > 14 ? `${s.slice(0, 13)}…` : s;
+                },
+            },
+        };
+        charts[canvasId] = new Chart(canvas, {
+            type: 'bar',
+            data: {
+                labels: rotulos,
+                datasets: [{
+                    data: valores,
+                    backgroundColor: COR_BARRA,
+                    hoverBackgroundColor: COR_BARRA_HOVER,
+                    borderRadius: 4,
+                    borderSkipped: 'start',
+                    maxBarThickness: 32,
+                }],
+            },
+            options: {
+                indexAxis: horizontal ? 'y' : 'x',
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: { duration: 250 },
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        displayColors: false,
+                        callbacks: {
+                            title: itens => (titulos || rotulos)[itens[0].dataIndex],
+                            label: item => fmt(item.raw),
+                        },
+                    },
+                },
+                scales: horizontal ? { x: eixoValor, y: eixoCategoria } : { x: eixoCategoria, y: eixoValor },
+            },
+        });
+    }
+
+    // Até ~2 meses: uma barra por dia. Acima disso (ex.: "Tudo"), as barras
+    // diárias ficariam finas demais no celular e o gráfico agrupa por mês.
+    function renderGraficoDias(serie) {
+        const titulo = $("#chartDias")?.closest('.chart-card')?.querySelector('h3');
+        const porMes = serie.length > 62;
+        if (titulo) titulo.textContent = porMes ? 'Faturamento por mês' : 'Faturamento por dia';
+        if (graficoVazio('chartDias', !serie.some(p => p.total > 0))) return;
+        let pontos;
+        if (porMes) {
+            const meses = new Map();
+            for (const p of serie) {
+                const k = p.dia.slice(0, 7);
+                meses.set(k, (meses.get(k) || 0) + p.total);
+            }
+            pontos = [...meses].map(([k, total]) => {
+                const nome = `${MESES[Number(k.slice(5, 7)) - 1]}/${k.slice(2, 4)}`;
+                return { rotulo: nome, titulo: nome, total };
+            });
+        } else {
+            pontos = serie.map(p => ({
+                rotulo: `${p.dia.slice(8, 10)}/${p.dia.slice(5, 7)}`,
+                titulo: fmtDataCurta(p.dia),
+                total: p.total,
+            }));
+        }
+        desenhaBarras('chartDias', {
+            rotulos: pontos.map(p => p.rotulo),
+            titulos: pontos.map(p => p.titulo),
+            valores: pontos.map(p => p.total),
+            fmt: fmtBRL,
+            fmtEixo: v => `R$ ${fmtCompacto(v)}`,
+        });
+    }
+
+    // Altura proporcional ao número de barras: legível no celular sem
+    // sobrar espaço vazio quando há só um ou dois itens.
+    function alturaHorizontal(boxId, n) {
+        const box = document.getElementById(boxId);
+        if (box) box.style.height = `${Math.max(120, n * 40 + 40)}px`;
+    }
+
+    function renderGraficoTecidos(tecidos) {
+        if (graficoVazio('chartTecidos', !tecidos.length)) return;
+        const metrica = state.tecidoMetrica;
+        const kg = metrica === 'peso_total';
+        // Maior barra sempre em cima, na medida escolhida.
+        tecidos = [...tecidos].sort((a, b) => (b[metrica] || 0) - (a[metrica] || 0));
+        alturaHorizontal('chartTecidosBox', tecidos.length);
+        desenhaBarras('chartTecidos', {
+            horizontal: true,
+            rotulos: tecidos.map(t => t.tecido || '(sem tecido)'),
+            valores: tecidos.map(t => t[metrica] || 0),
+            fmt: kg ? fmtKg : fmtBRL,
+            fmtEixo: v => (kg ? `${fmtCompacto(v)} kg` : `R$ ${fmtCompacto(v)}`),
+        });
+    }
+
+    // Só faz sentido comparar operadores quando a loja tem mais de um e
+    // nenhum filtro de operador está ativo.
+    function renderGraficoOperadores(rel) {
+        const card = $("#dashOperadoresCard");
+        const mostra = (rel.operadores || []).length > 1 && rel.usuario_id == null;
+        if (card) card.hidden = !mostra;
+        if (!mostra) return;
+        const ops = rel.por_operador || [];
+        if (graficoVazio('chartOperadores', !ops.length)) return;
+        alturaHorizontal('chartOperadoresBox', ops.length);
+        desenhaBarras('chartOperadores', {
+            horizontal: true,
+            rotulos: ops.map(o => o.nome || '(usuário removido)'),
+            valores: ops.map(o => o.faturamento || 0),
+            fmt: fmtBRL,
+            fmtEixo: v => `R$ ${fmtCompacto(v)}`,
+        });
+    }
+
+    // Encalhados (sem nenhuma venda) primeiro, depois os que venderam
+    // pouco e não aparecem no gráfico dos mais vendidos.
+    function renderParados(rel) {
+        const wrap = $("#dashParadosWrap");
+        if (!wrap) return;
+        const noGrafico = new Set((rel.tecidos_mais_vendidos || []).map(t => t.tecido));
+        const poucos = (rel.tecidos_menos_vendidos || []).filter(t => !noGrafico.has(t.tecido));
+        const enc = rel.tecidos_encalhados || [];
+        if (!enc.length && !poucos.length) {
+            wrap.innerHTML = '<p class="muted">Nenhum tecido parado: tudo em estoque vendeu no período.</p>';
+            return;
+        }
+        wrap.innerHTML = `<ul class="parados-lista">${
+            enc.map(t => `<li><span class="parado-nome">${esc(t)}</span><span class="parado-info is-zero">sem vendas</span></li>`).join('')
+        }${
+            poucos.map(t => `<li><span class="parado-nome">${esc(t.tecido)}</span><span class="parado-info">${esc(fmtBRL(t.faturamento))} · ${esc(fmtKg(t.peso_total))}</span></li>`).join('')
+        }</ul>`;
+    }
+
+    function renderFiltroOperador(rel) {
+        const wrap = $("#dashOperadorWrap");
+        const sel = $("#dashOperador");
+        if (!wrap || !sel) return;
+        const ops = rel.operadores || [];
+        wrap.hidden = ops.length <= 1;
+        sel.innerHTML = '<option value="">Todos</option>' + ops.map(o =>
+            `<option value="${esc(o.usuario_id)}">${esc(o.nome || '(sem nome)')}</option>`).join('');
+        sel.value = state.dashUsuarioId;
+    }
+
+    function renderDashboardLoja(rel) {
+        state.ultimoRelLoja = rel;
+        renderFiltroOperador(rel);
+        renderPeriodoInfo(rel);
+        renderKpis(rel);
+        renderGraficoDias(rel.serie_diaria || []);
+        renderGraficoTecidos(rel.tecidos_mais_vendidos || []);
+        renderGraficoOperadores(rel);
+        renderParados(rel);
     }
 
     function renderMinhasVendas(rel) {
@@ -624,10 +845,16 @@
 
     async function loadRelatorios() {
         const qs = periodoQuery();
+        // Filtros trocados em sequência: só a resposta mais nova é desenhada.
+        const seq = ++state.relSeq;
         try {
             const promessas = [jfetch(`/api/relatorio/meu?${qs}`)];
-            if (pode("relatorio_loja")) promessas.push(jfetch(`/api/relatorio/loja?${qs}`));
+            if (pode("relatorio_loja")) {
+                const op = state.dashUsuarioId ? `&usuario_id=${encodeURIComponent(state.dashUsuarioId)}` : '';
+                promessas.push(jfetch(`/api/relatorio/loja?${qs}${op}`));
+            }
             const [meu, loja] = await Promise.all(promessas);
+            if (seq !== state.relSeq) return;
             if (meu) renderMinhasVendas(meu);
             if (loja) renderDashboardLoja(loja);
         } catch (err) {
@@ -1252,12 +1479,63 @@
             bar.addEventListener("click", e => {
                 const btn = e.target.closest(".periodo-btn");
                 if (!btn) return;
-                state.periodo = btn.dataset.preset;
-                document.querySelectorAll(".periodo-btn").forEach(b =>
-                    b.classList.toggle("is-active", b.dataset.preset === state.periodo));
-                loadRelatorios();
-                loadDespesas();
+                // "Datas…" (só no Dashboard) abre o intervalo personalizado;
+                // o período só muda quando o usuário tocar em Aplicar.
+                if (btn.dataset.preset === "custom") { alternaFormDatas(); return; }
+                alternaFormDatas(false);
+                aplicaPeriodo(btn.dataset.preset);
             });
+        });
+
+        function aplicaPeriodo(preset) {
+            state.periodo = preset;
+            document.querySelectorAll(".periodo-btn").forEach(b =>
+                b.classList.toggle("is-active", b.dataset.preset === state.periodo));
+            loadRelatorios();
+            loadDespesas();
+        }
+
+        function alternaFormDatas(abrir) {
+            const form = $("#dashDatasForm");
+            if (!form) return;
+            const abre = abrir ?? form.hidden;
+            form.hidden = !abre;
+            $('.periodo-btn[data-preset="custom"]')?.setAttribute("aria-expanded", abre ? "true" : "false");
+            if (!abre) return;
+            // Começa preenchido com o período que está na tela.
+            const q = new URLSearchParams(periodoQuery());
+            form.elements.de.value = q.get("de") === "1970-01-01" ? "" : q.get("de");
+            form.elements.ate.value = q.get("ate");
+            form.elements.de.focus();
+        }
+
+        $("#dashDatasForm")?.addEventListener("submit", e => {
+            e.preventDefault();
+            let de = e.target.elements.de.value;
+            let ate = e.target.elements.ate.value;
+            if (!de || !ate) return;
+            if (de > ate) [de, ate] = [ate, de];
+            state.periodoDe = de;
+            state.periodoAte = ate;
+            aplicaPeriodo("custom");
+        });
+
+        $("#dashOperador")?.addEventListener("change", e => {
+            state.dashUsuarioId = e.target.value;
+            loadRelatorios();
+        });
+
+        // Tecidos mais vendidos: alterna entre R$ e kg (um eixo por vez).
+        $("#tecidoMetrica")?.addEventListener("click", e => {
+            const btn = e.target.closest(".seg-btn");
+            if (!btn || btn.dataset.metrica === state.tecidoMetrica) return;
+            state.tecidoMetrica = btn.dataset.metrica;
+            document.querySelectorAll("#tecidoMetrica .seg-btn").forEach(b => {
+                const ativo = b === btn;
+                b.classList.toggle("is-active", ativo);
+                b.setAttribute("aria-pressed", ativo ? "true" : "false");
+            });
+            if (state.ultimoRelLoja) renderGraficoTecidos(state.ultimoRelLoja.tecidos_mais_vendidos || []);
         });
 
         // Upload de planilha: multipart, então sem o Content-Type JSON do jfetch.

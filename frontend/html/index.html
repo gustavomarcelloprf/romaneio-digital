@@ -108,23 +108,53 @@
                 <!-- ====== Tela: Dashboard da loja (gerente e admin) ====== -->
                 <section class="view card" id="view-dashboard" hidden>
                     <h2>Dashboard</h2>
-                    <div class="periodo-bar" data-relatorio-periodo>
-                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="hoje">Hoje</button>
-                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="7d">7 dias</button>
-                        <button type="button" class="btn-secondary btn-sm periodo-btn is-active" data-preset="30d">30 dias</button>
-                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="mes">Este mês</button>
-                        <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
+                    <div class="dash-filtros">
+                        <div class="periodo-bar" data-relatorio-periodo>
+                            <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="hoje">Hoje</button>
+                            <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="7d">7 dias</button>
+                            <button type="button" class="btn-secondary btn-sm periodo-btn is-active" data-preset="30d">30 dias</button>
+                            <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="mes">Este mês</button>
+                            <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="tudo">Tudo</button>
+                            <button type="button" class="btn-secondary btn-sm periodo-btn" data-preset="custom" aria-controls="dashDatasForm" aria-expanded="false">Datas…</button>
+                        </div>
+                        <!-- Intervalo personalizado: só aparece ao tocar em "Datas…". -->
+                        <form id="dashDatasForm" class="dash-datas" hidden>
+                            <label>De <input type="date" name="de" required></label>
+                            <label>Até <input type="date" name="ate" required></label>
+                            <button type="submit" class="btn-primary btn-sm">Aplicar</button>
+                        </form>
+                        <!-- Só aparece quando a loja tem mais de um operador. -->
+                        <label id="dashOperadorWrap" class="dash-operador" hidden>
+                            <span>Operador</span>
+                            <select id="dashOperador"><option value="">Todos</option></select>
+                        </label>
                     </div>
-                    <div id="dashCards" class="dash-cards"></div>
+                    <p id="dashPeriodoInfo" class="dash-periodo-info muted"></p>
+                    <div id="dashKpis" class="dash-kpis"></div>
+                    <div id="dashCards" class="dash-cards dash-cards-sec"></div>
                     <div id="dashSaidasDetalhe" class="saidas-detalhe table-responsive" hidden></div>
-                    <h3>Por operador</h3>
-                    <div id="dashOperadoresWrap" class="table-responsive"></div>
-                    <h3>Tecidos mais vendidos</h3>
-                    <div id="dashMaisWrap" class="table-responsive"></div>
-                    <h3>Tecidos menos vendidos</h3>
-                    <div id="dashMenosWrap" class="table-responsive"></div>
-                    <h3>Encalhados no período</h3>
-                    <div id="dashEncalhadosWrap"></div>
+                    <div class="dash-charts">
+                        <div class="chart-card">
+                            <h3>Faturamento por dia</h3>
+                            <div class="chart-box chart-box-dias"><canvas id="chartDias" role="img" aria-label="Faturamento por dia"></canvas></div>
+                        </div>
+                        <div class="chart-card">
+                            <div class="chart-head">
+                                <h3>Tecidos mais vendidos</h3>
+                                <div class="seg" id="tecidoMetrica" role="group" aria-label="Medida">
+                                    <button type="button" class="seg-btn is-active" data-metrica="faturamento" aria-pressed="true">R$</button>
+                                    <button type="button" class="seg-btn" data-metrica="peso_total" aria-pressed="false">kg</button>
+                                </div>
+                            </div>
+                            <div class="chart-box" id="chartTecidosBox"><canvas id="chartTecidos" role="img" aria-label="Tecidos mais vendidos"></canvas></div>
+                        </div>
+                        <div class="chart-card" id="dashOperadoresCard" hidden>
+                            <h3>Vendas por operador</h3>
+                            <div class="chart-box" id="chartOperadoresBox"><canvas id="chartOperadores" role="img" aria-label="Vendas por operador"></canvas></div>
+                        </div>
+                    </div>
+                    <h3>Parados e pouco vendidos</h3>
+                    <div id="dashParadosWrap"></div>
                 </section>
 
                 <!-- ====== Tela: Minhas Vendas ====== -->
@@ -386,6 +416,7 @@
     </div>
 
     <noscript>Ative o JavaScript para usar o sistema.</noscript>
-    <script src="../js/script.js?v=36"></script>
+    <script src="../js/chart.min.js?v=4.5.1"></script>
+    <script src="../js/script.js?v=37"></script>
 </body>
 </html>
