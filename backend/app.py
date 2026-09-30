@@ -818,6 +818,31 @@ def pedidos_api():
 
         return jsonify(id=pedido_id, total=total), 201
 
+RECENTES_LIMITE = 15
+
+@app.get("/pedidos/recentes")
+@require_login
+def pedidos_recentes():
+    """Pedidos DE HOJE do usuário logado (os mais novos primeiro), para a
+    lista "Pedidos recentes" da tela Vender. Mesmo filtro de texto dos
+    relatórios: hoje <= data_iso < amanhã."""
+    hoje = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    amanha = hoje + timedelta(days=1)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT p.id, p.data_iso, p.tecido, p.total, p.pago, "
+            "COALESCE(c.nome, p.cliente_avulso, '') AS cliente_nome "
+            "FROM pedidos p LEFT JOIN clientes c ON c.id = p.cliente_id "
+            "WHERE p.loja = %s AND p.usuario_id = %s AND p.data_iso >= %s AND p.data_iso < %s "
+            "ORDER BY p.id DESC LIMIT %s",
+            (current_loja(), session.get("usuario_id"),
+             hoje.strftime("%Y-%m-%d"), amanha.strftime("%Y-%m-%d"), RECENTES_LIMITE),
+        ).fetchall()
+    finally:
+        conn.close()
+    return jsonify([dict(r) for r in rows])
+
 @app.route("/pedidos/<int:pedido_id>", methods=["GET", "PUT", "DELETE"])
 @require_login
 def pedido_single_api(pedido_id: int):

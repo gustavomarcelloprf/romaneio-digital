@@ -17,6 +17,7 @@
         periodo: "30d",
         saidasAberto: false,
         recorrentes: [],
+        recentes: [],
         view: null
     };
 
@@ -62,7 +63,7 @@
     // Carregamento sob demanda: ao abrir uma tela, seus dados são
     // reatualizados (o resto continua como está).
     function aoAbrirTela(id) {
-        if (id === "vender") loadStock();
+        if (id === "vender") { loadStock(); loadRecentes(); }
         else if (id === "pedidos") loadOrders();
         else if (id === "clientes") loadClients();
         else if (id === "estoque") loadStock();
@@ -270,22 +271,131 @@
         return { nome: valor, avulso: false };
     }
 
-    function mostrarVendaSalva(criado, payload) {
-        const box = $("#vendaSucesso");
-        if (!box) return;
-        const cliente = payload.cliente_id
-            ? (state.clientes.find(c => c.id === payload.cliente_id)?.nome || "")
-            : (payload.cliente_avulso || "");
-        box.innerHTML = `
-            <p>✓ Venda #${esc(criado.id)} salva${cliente ? ` para ${esc(cliente)}` : ''}: ${esc(fmtBRL(criado.total))}${payload.pago ? '' : ' (fiado)'}.</p>
-            <div class="item-row">
-                <button type="button" class="btn-primary btn-sm" data-acao="whatsapp" data-id="${esc(criado.id)}">Enviar no WhatsApp</button>
-                <button type="button" class="btn-secondary btn-sm" data-acao="png" data-id="${esc(criado.id)}">Romaneio (imagem)</button>
-                <button type="button" class="btn-secondary btn-sm" data-acao="pdf" data-id="${esc(criado.id)}">Romaneio (PDF)</button>
-                <button type="button" class="btn-secondary btn-sm" data-acao="fechar">Fechar</button>
-            </div>`;
-        box.hidden = false;
-        box.scrollIntoView({ behavior: "smooth", block: "start" });
+    // ===== Pedidos recentes (tela Vender) =====
+    // Os pedidos de hoje do usuário logado, mais novo no topo. Depois de
+    // salvar, a venda entra aqui na hora e o romaneio sai direto do cartão.
+    const RECENTES_LIMITE = 15;
+
+    function cartaoRecente(p, destaque) {
+        const hora = String(p.data_iso || '').slice(11, 16);
+        const cliente = p.cliente_nome
+            ? esc(p.cliente_nome)
+            : '<span class="muted">Sem cliente</span>';
+        return `
+            <li class="recente-card${destaque ? ' is-nova' : ''}" data-id="${esc(p.id)}">
+                <div class="recente-topo">
+                    <span class="recente-num">#${esc(p.id)}</span>
+                    ${hora ? `<span class="recente-hora">${esc(hora)}</span>` : ''}
+                    <span class="tag-status ${p.pago ? 'is-pago' : 'is-fiado'}">${p.pago ? 'Pago' : 'Fiado'}</span>
+                    <strong class="recente-total">${esc(fmtBRL(p.total))}</strong>
+                </div>
+                <div class="recente-info">${cliente} · ${esc(p.tecido)}</div>
+                <div class="recente-acoes">
+                    <button type="button" class="btn-secondary romaneio-btn" data-id="${esc(p.id)}" data-tipo="png" aria-label="Compartilhar romaneio #${esc(p.id)} em imagem (PNG)">PNG</button>
+                    <button type="button" class="btn-secondary romaneio-btn" data-id="${esc(p.id)}" data-tipo="pdf" aria-label="Compartilhar romaneio #${esc(p.id)} em PDF">PDF</button>
+                </div>
+            </li>`;
+    }
+
+    function renderRecentes(destaqueId = null) {
+        const lista = $("#recentesLista");
+        if (!lista) return;
+        lista.innerHTML = state.recentes.length
+            ? state.recentes.map(p => cartaoRecente(p, p.id === destaqueId)).join('')
+            : '<li class="muted recentes-vazio">Nenhuma venda sua hoje.</li>';
+    }
+
+    async function loadRecentes() {
+        try {
+            const lista = await jfetch("/pedidos/recentes");
+            if (!Array.isArray(lista)) return;
+            state.recentes = lista;
+            renderRecentes();
+        } catch (err) {
+            const el = $("#recentesLista");
+            if (el) el.innerHTML = `<li class="msg erro">Erro ao carregar pedidos recentes: ${esc(err.message)}</li>`;
+        }
+    }
+
+    // Venda recém-salva: entra no topo sem ir ao servidor e ganha destaque.
+    function adicionarRecente(pedido) {
+        state.recentes = [pedido, ...state.recentes.filter(p => p.id !== pedido.id)].slice(0, RECENTES_LIMITE);
+        renderRecentes(pedido.id);
+        $("#recentesLista .recente-card.is-nova")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    // ===== Romaneio: compartilhar (Web Share API) ou baixar =====
+    // No celular abre a folha de compartilhamento do sistema com o arquivo
+    // anexado (WhatsApp incluso). Sem suporte (desktop, ou http fora do
+    // localhost, que não é contexto seguro) cai no download normal.
+    const MIME_ROMANEIO = { png: "image/png", pdf: "application/pdf" };
+    // Arquivo já gerado cujo share foi recusado por falta de gesto do usuário
+    // (o fetch demorou demais): o próximo toque compartilha na hora.
+    const romaneiosProntos = new Map();
+
+    async function gerarRomaneio(id, tipo) {
+        const res = await fetch(`/exportar/${encodeURIComponent(id)}?type=${tipo}`, { credentials: "include" });
+        if (res.status === 401) { window.location.href = "/acesso"; return null; }
+        if (!res.ok) {
+            const json = await res.json().catch(() => ({}));
+            throw new Error(json.error || `Erro HTTP ${res.status}`);
+        }
+        const blob = await res.blob();
+        return new File([blob], `romaneio_${id}.${tipo}`, { type: blob.type || MIME_ROMANEIO[tipo] });
+    }
+
+    function baixarArquivo(file) {
+        const url = URL.createObjectURL(file);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }
+
+    async function compartilharRomaneio(btn) {
+        const { id, tipo } = btn.dataset;
+        const chave = `${id}.${tipo}`;
+        const rotulo = btn.dataset.rotulo || (btn.dataset.rotulo = btn.textContent);
+        btn.textContent = rotulo;
+        btn.classList.remove("is-pronto");
+
+        let file = romaneiosProntos.get(chave);
+        romaneiosProntos.delete(chave);
+        if (!file) {
+            btn.disabled = true;
+            btn.textContent = "Gerando…";
+            try {
+                file = await gerarRomaneio(id, tipo);
+            } catch (err) {
+                alert(`Erro ao gerar o romaneio: ${err.message}`);
+                return;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = rotulo;
+            }
+            if (!file) return;
+        }
+
+        if (!navigator.canShare?.({ files: [file] })) return baixarArquivo(file);
+        try {
+            await navigator.share({
+                files: [file],
+                title: `Romaneio #${id}`,
+                text: `Romaneio #${id}${state.loja ? ` · ${state.loja}` : ''}`,
+            });
+        } catch (err) {
+            if (err.name === "AbortError") return;  // o operador fechou a folha
+            if (err.name === "NotAllowedError") {
+                romaneiosProntos.set(chave, file);
+                btn.textContent = "Toque para enviar";
+                btn.classList.add("is-pronto");
+                return;
+            }
+            baixarArquivo(file);
+        }
     }
 
     async function loadClients() {
@@ -719,10 +829,8 @@
                         <td class="actions">
                             <button class="btn-secondary btn-sm edit-pedido-btn" data-id="${p.id}">Editar</button>
                             <button class="btn-secondary btn-danger btn-sm remove-pedido-btn" data-id="${p.id}">Remover</button>
-                            <button class="btn-secondary btn-sm png-pedido-btn" data-id="${p.id}">PNG</button>
-                            <button class="btn-secondary btn-sm pdf-pedido-btn" data-id="${p.id}">PDF</button>
-                            <button class="btn-secondary btn-sm whatsapp-pedido-btn" data-id="${p.id}"
-                                title="Envia o romaneio em texto pelo WhatsApp. O WhatsApp não anexa arquivo pelo link: use PNG ou PDF para anexar manualmente.">WhatsApp</button>
+                            <button class="btn-secondary btn-sm romaneio-btn" data-id="${p.id}" data-tipo="png">PNG</button>
+                            <button class="btn-secondary btn-sm romaneio-btn" data-id="${p.id}" data-tipo="pdf">PDF</button>
                         </td>
                     </tr>`).join('')}
                 </tbody>
@@ -1103,47 +1211,6 @@
         state.pedidoEmEdicao = { id: null, itens: [] };
     }
 
-    // ===== WhatsApp (link wa.me, sem API) =====
-    // Só dígitos, sem o 0 de operadora/DDD; com DDD (10–11 dígitos) ganha o 55.
-    // Número curto demais vira "sem telefone": o vendedor escolhe o contato.
-    function normalizarTelefoneBR(tel) {
-        let d = String(tel || '').replace(/\D/g, '').replace(/^0+/, '');
-        if (d.length === 10 || d.length === 11) d = '55' + d;
-        return d.length >= 12 ? d : '';
-    }
-
-    function montarMensagemWhatsApp(pedido, itens) {
-        const peso = n => Number(n || 0).toLocaleString('pt-BR', { maximumFractionDigits: 3 });
-        const linhas = [
-            `*${pedido.loja_nome || state.loja}*`,
-            `Romaneio #${pedido.id}`,
-            `Cliente: ${pedido.cliente_nome || '-'}`,
-            '',
-            'Itens:',
-            ...itens.map(it => `- ${it.cor || 'Sem cor'}: ${peso(it.peso_kg)} kg`),
-            '',
-            `*Total: ${fmtBRL(pedido.total)}*`,
-        ];
-        if (pedido.loja_pix_chave) linhas.push(`Chave PIX: ${pedido.loja_pix_chave}`);
-        return linhas.join('\n');
-    }
-
-    async function enviarWhatsApp(pedidoId) {
-        // A aba abre já no clique: aberta depois do await o navegador bloqueia o pop-up.
-        const aba = window.open('', '_blank');
-        try {
-            const { pedido, itens } = await jfetch(`/pedidos/${pedidoId}`);
-            const texto = encodeURIComponent(montarMensagemWhatsApp(pedido, itens || []));
-            const fone = normalizarTelefoneBR(pedido.cliente_telefone);
-            const url = `https://wa.me/${fone}?text=${texto}`;
-            if (aba) { aba.opener = null; aba.location.href = url; }
-            else window.open(url, '_blank', 'noopener');
-        } catch (err) {
-            aba?.close();
-            alert(`Erro ao montar mensagem do WhatsApp: ${err.message}`);
-        }
-    }
-
     // ===== Event Listeners =====
     document.addEventListener("DOMContentLoaded", () => {
         const formPix = $("#formPix"), formCliente = $("#formCliente"), formUsuario = $("#formUsuario");
@@ -1458,18 +1525,32 @@
                 descontar_estoque: !tecido.avulso && $("#descontar_estoque").checked,
                 pago: !fiado,
             };
+            const clienteNome = payload.cliente_id
+                ? (state.clientes.find(c => c.id === payload.cliente_id)?.nome || "")
+                : (payload.cliente_avulso || "");
+            const msg = $("#msgPedido");
+            msg.className = "msg";
+            msg.textContent = "";
             const btn = e.submitter;
             if (btn) btn.disabled = true;
             try {
                 const criado = await jfetch("/pedidos", { method: "POST", body: JSON.stringify(payload) });
-                // Fica na tela Vender: limpa o formulário e mostra o romaneio pronto.
+                // Fica na tela Vender: limpa o formulário e põe a venda no topo
+                // de "Pedidos recentes", de onde sai o romaneio.
+                const agora = new Date();
+                adicionarRecente({
+                    id: criado.id, total: criado.total, tecido: payload.tecido,
+                    cliente_nome: clienteNome, pago: payload.pago ? 1 : 0,
+                    data_iso: `${isoDate(agora)} ${String(agora.getHours()).padStart(2, '0')}:${String(agora.getMinutes()).padStart(2, '0')}`,
+                });
+                msg.className = "msg ok";
+                msg.textContent = "Venda salva ✓";
                 state.novoPedido.itens = [];
                 formPedido.reset();
                 renderTecidosVenda();
                 renderItens(state.novoPedido.itens, itensWrap, 'remove-item');
                 updateTotalPreview(state.novoPedido.itens, inpPreco, totalPreviewEl);
                 atualizarAvisosVenda();
-                mostrarVendaSalva(criado, payload);
                 loadOrders();
                 loadRelatorios();
                 if (payload.descontar_estoque) loadStock();
@@ -1507,15 +1588,11 @@
         $("#tecidoSelect")?.addEventListener("change", aoTrocarTecido);
         $("#clienteNome")?.addEventListener("input", atualizarAvisosVenda);
         $("#fiado")?.addEventListener("change", atualizarAvisosVenda);
-        $("#vendaSucesso")?.addEventListener("click", e => {
-            const btn = e.target.closest("button");
-            if (!btn) return;
-            if (btn.dataset.acao === "fechar") { $("#vendaSucesso").hidden = true; return; }
-            const id = btn.dataset.id;
-            if (btn.dataset.acao === "png") window.open(`/exportar/${id}?type=png`, '_blank');
-            else if (btn.dataset.acao === "pdf") window.open(`/exportar/${id}?type=pdf`, '_blank');
-            else if (btn.dataset.acao === "whatsapp") enviarWhatsApp(id);
-        });
+        // PNG/PDF: mesmo compartilhamento na lista recente e na aba Pedidos.
+        [$("#recentesLista"), pedidosWrap].forEach(wrap => wrap?.addEventListener("click", e => {
+            const btn = e.target.closest(".romaneio-btn");
+            if (btn && !btn.disabled) compartilharRomaneio(btn);
+        }));
         
         clienteSearchInput?.addEventListener('keyup', loadClients);
         orderSortSelect?.addEventListener('change', loadOrders);
@@ -1581,18 +1658,10 @@
                     try {
                         await jfetch(`/pedidos/${pedidoId}`, { method: 'DELETE' });
                         loadOrders();
+                        loadRecentes();
                         loadRelatorios();
                     } catch (err) { alert(`Erro: ${err.message}`); }
                 }
-            }
-            else if (target.classList.contains('pdf-pedido-btn')) {
-                window.open(`/exportar/${pedidoId}?type=pdf`, '_blank');
-            }
-            else if (target.classList.contains('png-pedido-btn')) {
-                window.open(`/exportar/${pedidoId}?type=png`, '_blank');
-            }
-            else if (target.classList.contains('whatsapp-pedido-btn')) {
-                enviarWhatsApp(pedidoId);
             }
         });
 
@@ -1794,6 +1863,7 @@
                     await jfetch(`/pedidos/${pedidoId}`, { method: 'PUT', body: JSON.stringify(payload) });
                     closeEditModal();
                     loadOrders();
+                    loadRecentes();
                     loadRelatorios();
                     alert('Pedido atualizado com sucesso!');
                 } catch (err) { alert(`Erro ao atualizar pedido: ${err.message}`); }

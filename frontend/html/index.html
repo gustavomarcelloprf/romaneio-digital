@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Romaneio Digital</title>
     <!-- A versão foi incrementada para forçar a atualização do cache dos arquivos CSS/JS -->
-    <link rel="stylesheet" href="../css/style.css?v=34" />
+    <link rel="stylesheet" href="../css/style.css?v=35" />
 </head>
 <body>
     <div class="app-shell">
@@ -35,8 +35,6 @@
                 <!-- ====== Tela: Vender (inicial) ====== -->
                 <section class="view card" id="view-vender" hidden>
                     <h2>Vender</h2>
-                    <!-- Depois de salvar a venda fica aqui mesmo: o aviso traz o romaneio (PNG/PDF/WhatsApp). -->
-                    <div id="vendaSucesso" class="venda-sucesso" role="status" hidden></div>
                     <form id="formPedido">
                         <div class="grid">
                             <div class="form-group">
@@ -81,8 +79,15 @@
                             </div>
                             <button type="submit" class="btn-primary">Salvar</button>
                         </div>
-                        <div id="msgPedido" class="msg"></div>
+                        <div id="msgPedido" class="msg" role="status"></div>
                     </form>
+
+                    <!-- Depois de salvar, a venda entra no topo desta lista e o
+                         romaneio é compartilhado daqui mesmo (PNG/PDF). -->
+                    <section class="recentes" aria-labelledby="recentesTitulo">
+                        <h3 id="recentesTitulo">Pedidos recentes <small class="muted">seus, de hoje</small></h3>
+                        <ul id="recentesLista" class="recentes-lista"></ul>
+                    </section>
                 </section>
 
                 <!-- ====== Tela: Pedidos ====== -->
@@ -97,7 +102,6 @@
                             <option value="total_asc">Valor (Menor)</option>
                         </select></label>
                     </div>
-                    <p class="muted"><small>O botão WhatsApp envia o romaneio em texto. O link do WhatsApp não anexa arquivos: se quiser mandar a imagem ou o PDF, baixe pelos botões PNG/PDF e anexe na conversa.</small></p>
                     <div id="pedidosWrap" class="table-responsive"></div>
                 </section>
 
@@ -382,6 +386,6 @@
     </div>
 
     <noscript>Ative o JavaScript para usar o sistema.</noscript>
-    <script src="../js/script.js?v=35"></script>
+    <script src="../js/script.js?v=36"></script>
 </body>
 </html>
