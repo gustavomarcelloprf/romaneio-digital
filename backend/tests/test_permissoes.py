@@ -160,6 +160,10 @@ def test_gerente_ve_relatorio_da_loja_sem_comissoes(ctx):
     # A coluna de comissão também some do ranking por operador.
     assert rel["por_operador"]
     assert all("comissao" not in o for o in rel["por_operador"])
+    # A comparação com o período anterior segue a mesma regra.
+    for chave in ("comissoes_a_pagar", "lucro", "saidas_total", "despesas_total"):
+        assert chave not in rel["periodo_anterior"]
+    assert "faturamento_total" in rel["periodo_anterior"]
 
 
 def test_admin_ve_comissoes_a_pagar(ctx):

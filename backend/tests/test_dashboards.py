@@ -232,3 +232,155 @@ def test_relatorio_nao_vaza_pedidos_de_outra_loja(ctx):
     rel_b = admin_b.get(f"/api/relatorio/loja{PERIODO}").get_json()
     assert rel_b["num_pedidos"] == 1
     assert rel_b["faturamento_total"] == 900.0
+
+
+# ---------------------------------------------------------------------------
+# /api/relatorio/loja: comparação com o período anterior
+# ---------------------------------------------------------------------------
+def test_relatorio_loja_periodo_anterior_mesma_duracao(ctx):
+    rel = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}").get_json()
+    ant = rel["periodo_anterior"]
+    # Janeiro tem 31 dias: o anterior são os 31 dias que terminam na véspera.
+    assert ant["de"] == "2025-12-01"
+    assert ant["ate"] == "2025-12-31"
+    # Só o pedido de 2025-12-20 (operador, 50,00 × 10% = 5,00 de comissão).
+    assert ant["faturamento_total"] == 50.0
+    assert ant["num_pedidos"] == 1
+    assert ant["ticket_medio"] == 50.0
+    assert ant["comissoes_a_pagar"] == 5.0
+    assert ant["lucro"] == 45.0
+    # E o período atual segue com os números de sempre.
+    assert rel["lucro"] == 61.5  # 65,00 − 3,50 de comissões
+
+
+def test_relatorio_loja_periodo_anterior_de_um_dia(ctx):
+    rel = ctx["admin"].get("/api/relatorio/loja?de=2026-01-15&ate=2026-01-15").get_json()
+    assert rel["faturamento_total"] == 30.0
+    ant = rel["periodo_anterior"]
+    assert (ant["de"], ant["ate"]) == ("2026-01-14", "2026-01-14")
+    assert ant["faturamento_total"] == 0.0
+    assert ant["num_pedidos"] == 0
+    assert ant["ticket_medio"] == 0.0
+
+
+def test_relatorio_loja_periodo_anterior_inclui_despesas(ctx):
+    resp = ctx["admin"].post(
+        "/api/despesas",
+        json={"data": "2025-12-10", "descricao": "Luz", "categoria": "Energia", "valor": "20,00"},
+    )
+    assert resp.status_code == 201
+    ant = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}").get_json()["periodo_anterior"]
+    assert ant["despesas_total"] == 20.0
+    assert ant["saidas_total"] == 25.0
+    assert ant["lucro"] == 25.0  # 50 − 20 de despesa − 5 de comissão
+
+
+# ---------------------------------------------------------------------------
+# /api/relatorio/loja: série diária
+# ---------------------------------------------------------------------------
+def test_relatorio_loja_serie_diaria_cobre_todos_os_dias(ctx):
+    rel = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}").get_json()
+    serie = rel["serie_diaria"]
+    assert len(serie) == 31
+    assert serie[0]["dia"] == "2026-01-01"
+    assert serie[-1]["dia"] == "2026-01-31"
+    por_dia = {p["dia"]: p["total"] for p in serie}
+    assert por_dia["2026-01-10"] == 20.0
+    assert por_dia["2026-01-15"] == 30.0
+    assert por_dia["2026-01-31"] == 15.0  # venda às 18h do último dia
+    assert por_dia["2026-01-02"] == 0.0   # dia sem venda também vem, zerado
+    assert sum(por_dia.values()) == rel["faturamento_total"]
+
+
+def test_relatorio_loja_serie_de_periodo_longo_comeca_na_primeira_venda(ctx):
+    # O atalho "Tudo" manda de=1970-01-01: a série não traz décadas de zeros.
+    rel = ctx["admin"].get("/api/relatorio/loja?de=1970-01-01&ate=2026-01-31").get_json()
+    serie = rel["serie_diaria"]
+    assert serie[0]["dia"] == "2025-12-20"
+    assert serie[-1]["dia"] == "2026-01-31"
+    assert sum(p["total"] for p in serie) == rel["faturamento_total"] == 115.0
+
+
+# ---------------------------------------------------------------------------
+# /api/relatorio/loja: filtro por operador
+# ---------------------------------------------------------------------------
+def test_relatorio_loja_lista_operadores_para_o_filtro(ctx):
+    rel = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}").get_json()
+    assert rel["usuario_id"] is None
+    ids = {o["usuario_id"] for o in rel["operadores"]}
+    assert ids == {ctx["admin_id"], ctx["operador_id"]}
+
+
+def test_relatorio_loja_filtro_por_operador(ctx):
+    resp = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}&usuario_id={ctx['operador_id']}")
+    assert resp.status_code == 200
+    rel = resp.get_json()
+    assert rel["usuario_id"] == ctx["operador_id"]
+    # Só as vendas do operador: 20 + 15 (a de 30,00 do admin fica de fora).
+    assert rel["faturamento_total"] == 35.0
+    assert rel["num_pedidos"] == 2
+    assert rel["comissoes_a_pagar"] == 3.5
+    assert [o["usuario_id"] for o in rel["por_operador"]] == [ctx["operador_id"]]
+    assert {t["tecido"]: t["faturamento"] for t in rel["tecidos_mais_vendidos"]} == {
+        "Malha": 20.0, "Brim": 15.0,
+    }
+    por_dia = {p["dia"]: p["total"] for p in rel["serie_diaria"]}
+    assert por_dia["2026-01-15"] == 0.0  # venda do admin
+    assert sum(por_dia.values()) == 35.0
+    # O período anterior respeita o mesmo filtro.
+    assert rel["periodo_anterior"]["faturamento_total"] == 50.0
+    # A lista de operadores do filtro continua completa.
+    assert len(rel["operadores"]) == 2
+    # Encalhado é estoque parado da loja: não muda com o filtro.
+    assert "Tecido Parado" in rel["tecidos_encalhados"]
+    assert "Malha" not in rel["tecidos_encalhados"]
+
+
+def test_relatorio_loja_filtro_por_operador_ignora_despesas_da_loja(ctx):
+    resp = ctx["admin"].post(
+        "/api/despesas",
+        json={"data": "2026-01-05", "descricao": "Luz", "categoria": "Energia", "valor": "100,00"},
+    )
+    assert resp.status_code == 201
+    geral = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}").get_json()
+    assert geral["despesas_total"] == 100.0
+
+    rel = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}&usuario_id={ctx['operador_id']}").get_json()
+    # Despesa da loja não é de nenhum operador: o lucro é venda − comissão.
+    assert rel["despesas_total"] == 0.0
+    assert rel["lucro"] == 31.5
+    assert rel["saidas_detalhe"] == [{"categoria": "Comissões (vendas)", "valor": 3.5}]
+
+
+def test_relatorio_loja_filtro_pelo_admin(ctx):
+    rel = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}&usuario_id={ctx['admin_id']}").get_json()
+    assert rel["faturamento_total"] == 30.0
+    assert rel["comissoes_a_pagar"] == 0.0  # o admin não recebe comissão
+    assert rel["periodo_anterior"]["faturamento_total"] == 0.0
+
+
+def test_relatorio_loja_filtro_por_operador_invalido(ctx):
+    resp = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}&usuario_id=abc")
+    assert resp.status_code == 400
+
+
+def test_relatorio_loja_filtro_por_operador_de_outra_loja_nao_vaza(ctx):
+    admin_b, cliente_b = _signup_loja_aprovada(LOJA_B)
+    _post_pedido(admin_b, cliente_b, "Malha", "9,0", "100,00", "2026-01-05 10:00")
+    conn = database.get_conn()
+    admin_b_id = conn.execute(
+        "SELECT id FROM usuarios WHERE loja=%s AND login='admin'", (LOJA_B,)
+    ).fetchone()["id"]
+    conn.close()
+
+    rel = ctx["admin"].get(f"/api/relatorio/loja{PERIODO}&usuario_id={admin_b_id}").get_json()
+    assert rel["faturamento_total"] == 0.0
+    assert rel["num_pedidos"] == 0
+    assert rel["por_operador"] == []
+    assert all(p["total"] == 0.0 for p in rel["serie_diaria"])
+    assert admin_b_id not in {o["usuario_id"] for o in rel["operadores"]}
+
+
+def test_operador_recebe_403_mesmo_com_filtro(ctx):
+    resp = ctx["op"].get(f"/api/relatorio/loja{PERIODO}&usuario_id={ctx['operador_id']}")
+    assert resp.status_code == 403

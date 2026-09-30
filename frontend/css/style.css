@@ -454,6 +454,193 @@ button.stat-card:hover { border-color: var(--primary); }
     margin-top: 8px;
 }
 
+/* ====== Dashboard da loja: filtros, KPIs e gráficos ====== */
+.dash-filtros {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+.dash-filtros .periodo-bar { margin-bottom: 0; }
+.dash-datas[hidden],
+.dash-operador[hidden] { display: none; }
+.dash-datas {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px;
+}
+.dash-datas label,
+.dash-operador {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+}
+.dash-datas input { width: auto; min-width: 140px; }
+.dash-datas button { width: auto; min-height: 40px; padding: 0 20px; }
+.dash-operador select { max-width: 260px; }
+.dash-periodo-info { font-size: 13px; margin: 4px 0 12px; }
+
+.dash-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.kpi-card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--card);
+    padding: 14px 16px;
+    min-width: 0;
+}
+.kpi-label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+}
+.kpi-valor {
+    display: block;
+    font-size: 26px;
+    font-weight: 700;
+    margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+.kpi-valor.is-negativo { color: #dc2626; }
+.kpi-hint { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.kpi-delta {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    margin-top: 6px;
+}
+.kpi-delta.is-up { color: #15803d; }
+.kpi-delta.is-down { color: #b91c1c; }
+
+/* Linha secundária: Ticket médio, Pedidos e Saídas, menores. */
+.dash-cards-sec {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    margin-bottom: 12px;
+}
+.dash-cards-sec .kpi-card,
+.dash-cards-sec .stat-card {
+    background: var(--bg);
+    padding: 10px 12px;
+}
+.dash-cards-sec .kpi-valor,
+.dash-cards-sec .stat-card .stat-value { font-size: 17px; }
+.dash-cards-sec .kpi-delta { margin-top: 4px; font-weight: 500; }
+
+.dash-charts {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    margin: 4px 0 16px;
+}
+.chart-card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 12px;
+    min-width: 0;
+}
+.chart-card h3 { margin: 0 0 8px; font-size: 15px; }
+.chart-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.chart-head h3 { margin: 0; }
+.chart-box {
+    position: relative;
+    height: 220px;
+    width: 100%;
+}
+.chart-box canvas { max-width: 100%; }
+.chart-box.is-vazio { height: auto !important; }
+.chart-box.is-vazio canvas { display: none; }
+.chart-box.is-vazio::after {
+    content: attr(data-msg);
+    display: block;
+    padding: 12px 0;
+    color: var(--muted);
+}
+
+/* Alternador R$ / kg */
+.seg {
+    display: inline-flex;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+.seg-btn {
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    background: var(--card);
+    color: var(--muted);
+    border: 0;
+    padding: 6px 14px;
+    min-height: 32px;
+    cursor: pointer;
+}
+.seg-btn.is-active { background: var(--primary); color: var(--primary-text); }
+
+.parados-lista {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+.parados-lista li {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--line);
+}
+.parados-lista li:first-child { border-top: 0; }
+.parado-nome { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.parado-info {
+    font-size: 13px;
+    color: var(--muted);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.parado-info.is-zero { color: #b45309; font-weight: 600; }
+
+@media (min-width: 900px) {
+    .dash-charts { grid-template-columns: 1fr 1fr; }
+    .dash-charts .chart-card:first-child { grid-column: 1 / -1; }
+    .chart-box-dias { height: 260px; }
+}
+@media (max-width: 600px) {
+    .dash-kpis { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .dash-kpis .kpi-destaque { grid-column: 1 / -1; }
+    .kpi-card { padding: 12px; }
+    .kpi-valor { font-size: 20px; }
+    .kpi-destaque .kpi-valor { font-size: 28px; }
+    .dash-cards-sec { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .dash-cards-sec .kpi-valor,
+    .dash-cards-sec .stat-card .stat-value { font-size: 15px; }
+    .dash-cards-sec .kpi-delta,
+    .dash-cards-sec .stat-card .stat-hint { font-size: 11px; }
+    .dash-datas input { min-width: 0; width: 100%; }
+    .dash-datas label { flex: 1 1 130px; }
+    .dash-datas button { flex: 1 1 100%; }
+    .dash-operador select { max-width: none; }
+}
+
 /* --- Estilos do Modal de Edição --- */
 .modal-overlay {
     position: fixed; 

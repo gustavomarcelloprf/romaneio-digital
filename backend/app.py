@@ -1543,6 +1543,87 @@ def _periodo_from_args():
     ate_exclusivo = (dt_ate + timedelta(days=1)).strftime("%Y-%m-%d")
     return de, ate, ate_exclusivo
 
+# Acima disso a série diária começa no primeiro dia com venda em vez de no
+# "de" pedido: o atalho "Tudo" manda de=1970-01-01 e não faz sentido devolver
+# dezenas de milhares de dias zerados.
+SERIE_MAX_DIAS = 366
+
+
+def _totais_loja(conn, loja, de, ate_ex, usuario_id, ve_comissoes):
+    """Totais de um período (usados no período pedido e no anterior).
+
+    Com filtro de operador, as despesas da loja ficam de fora: não são de
+    nenhum operador, e descontá-las da venda de um só daria um "lucro" sem
+    sentido. Nesse caso o lucro é a venda do operador menos a comissão dele.
+    """
+    filtro, params = _filtro_operador(usuario_id)
+    tot = conn.execute(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(p.total), 0) AS fat, "
+        # Só as comissões de quem de fato recebe (o admin nunca recebe).
+        "COALESCE(SUM(p.comissao_valor) FILTER (WHERE COALESCE(u.papel, '') != 'admin'), 0) AS com "
+        "FROM pedidos p LEFT JOIN usuarios u ON u.id = p.usuario_id "
+        f"WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s{filtro}",
+        (loja, de, ate_ex, *params),
+    ).fetchone()
+    num_pedidos = tot["n"]
+    faturamento = round(tot["fat"], 2)
+    totais = {
+        "faturamento_total": faturamento,
+        "num_pedidos": num_pedidos,
+        "ticket_medio": round(faturamento / num_pedidos, 2) if num_pedidos else 0.0,
+    }
+    if ve_comissoes:
+        comissoes = round(tot["com"], 2)
+        if usuario_id is None:
+            despesas_total, despesas_por_categoria = _despesas_resumo(conn, loja, de, ate_ex)
+        else:
+            despesas_total, despesas_por_categoria = 0.0, []
+        saidas_total = round(despesas_total + comissoes, 2)
+        totais.update(
+            comissoes_a_pagar=comissoes,
+            despesas_total=despesas_total,
+            despesas_por_categoria=despesas_por_categoria,
+            saidas_total=saidas_total,
+            lucro=round(faturamento - saidas_total, 2),
+        )
+    return totais
+
+
+def _filtro_operador(usuario_id, alias="p"):
+    """Trecho SQL (e parâmetros) do filtro opcional por operador."""
+    if usuario_id is None:
+        return "", ()
+    return f" AND {alias}.usuario_id = %s", (usuario_id,)
+
+
+def _serie_diaria(conn, loja, de, ate, ate_ex, usuario_id):
+    """[{dia, total}] com todos os dias do período, inclusive os sem venda."""
+    filtro, params = _filtro_operador(usuario_id)
+    por_dia = {
+        r["dia"]: round(r["total"], 2)
+        for r in conn.execute(
+            "SELECT SUBSTRING(p.data_iso FROM 1 FOR 10) AS dia, COALESCE(SUM(p.total), 0) AS total "
+            "FROM pedidos p "
+            f"WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s{filtro} "
+            "GROUP BY 1 ORDER BY 1",
+            (loja, de, ate_ex, *params),
+        ).fetchall()
+    }
+    inicio = datetime.strptime(de, "%Y-%m-%d")
+    fim = datetime.strptime(ate, "%Y-%m-%d")
+    if (fim - inicio).days > SERIE_MAX_DIAS:
+        if not por_dia:
+            return []
+        inicio = max(inicio, datetime.strptime(min(por_dia), "%Y-%m-%d"))
+    serie = []
+    dia = inicio
+    while dia <= fim:
+        chave = dia.strftime("%Y-%m-%d")
+        serie.append({"dia": chave, "total": por_dia.get(chave, 0.0)})
+        dia += timedelta(days=1)
+    return serie
+
+
 @app.get("/api/relatorio/loja")
 @require_login
 @require_perm("relatorio_loja")
@@ -1554,28 +1635,42 @@ def relatorio_loja():
     # números (despesas/lucro/comissões) são o mesmo dado financeiro.
     ve_comissoes = pode("despesas_gerir")
     de, ate, ate_ex = _periodo_from_args()
+
+    usuario_id = None
+    if (request.args.get("usuario_id") or "").strip():
+        try:
+            usuario_id = int(request.args["usuario_id"])
+        except ValueError:
+            return jsonify(error="usuario_id inválido."), 400
+    filtro, filtro_params = _filtro_operador(usuario_id)
+
+    # Período anterior com a mesma duração, terminando na véspera do "de".
+    dt_de = datetime.strptime(de, "%Y-%m-%d")
+    dias = (datetime.strptime(ate, "%Y-%m-%d") - dt_de).days + 1
+    ant_ate = dt_de - timedelta(days=1)
+    ant_de = dt_de - timedelta(days=dias)
+
     conn = get_conn()
     try:
-        tot = conn.execute(
-            "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat "
-            "FROM pedidos WHERE loja = %s AND data_iso >= %s AND data_iso < %s",
-            (loja, de, ate_ex),
-        ).fetchone()
-        num_pedidos = tot["n"]
-        faturamento_total = round(tot["fat"], 2)
-        ticket_medio = round(faturamento_total / num_pedidos, 2) if num_pedidos else 0.0
-
-        # Só as comissões de quem de fato recebe (o admin nunca recebe).
-        comissoes_a_pagar = round(
-            conn.execute(
-                "SELECT COALESCE(SUM(p.comissao_valor), 0) AS com FROM pedidos p "
-                "LEFT JOIN usuarios u ON u.id = p.usuario_id "
-                "WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s "
-                "AND COALESCE(u.papel, '') != 'admin'",
-                (loja, de, ate_ex),
-            ).fetchone()["com"],
-            2,
+        totais = _totais_loja(conn, loja, de, ate_ex, usuario_id, ve_comissoes)
+        anterior = _totais_loja(
+            conn, loja, ant_de.strftime("%Y-%m-%d"), dt_de.strftime("%Y-%m-%d"),
+            usuario_id, ve_comissoes,
         )
+        serie = _serie_diaria(conn, loja, de, ate, ate_ex, usuario_id)
+
+        # Quem pode aparecer no filtro por operador: os usuários ativos da
+        # loja, mais quem vendeu no período mesmo estando inativo hoje.
+        operadores = [
+            {"usuario_id": r["id"], "nome": r["nome"]}
+            for r in conn.execute(
+                "SELECT id, nome FROM usuarios WHERE loja = %s AND ("
+                "  ativo = 1 OR id IN (SELECT usuario_id FROM pedidos "
+                "                      WHERE loja = %s AND data_iso >= %s AND data_iso < %s)"
+                ") ORDER BY nome",
+                (loja, loja, de, ate_ex),
+            ).fetchall()
+        ]
 
         por_operador = [
             {
@@ -1589,9 +1684,9 @@ def relatorio_loja():
                 "SELECT p.usuario_id, COALESCE(u.nome, '') AS nome, COUNT(*) AS num_pedidos, "
                 "COALESCE(SUM(p.total), 0) AS faturamento, COALESCE(SUM(p.comissao_valor), 0) AS comissao "
                 "FROM pedidos p LEFT JOIN usuarios u ON u.id = p.usuario_id "
-                "WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s "
+                f"WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s{filtro} "
                 "GROUP BY p.usuario_id, u.nome ORDER BY faturamento DESC",
-                (loja, de, ate_ex),
+                (loja, de, ate_ex, *filtro_params),
             ).fetchall()
         ]
 
@@ -1603,17 +1698,18 @@ def relatorio_loja():
             }
             for r in conn.execute(
                 "SELECT p.tecido, COALESCE(SUM(p.total), 0) AS faturamento, "
-                "COALESCE((SELECT SUM(i.peso_kg) FROM itens_pedido i "
-                "          JOIN pedidos p2 ON p2.id = i.pedido_id "
-                "          WHERE p2.loja = %s AND p2.tecido = p.tecido "
-                "            AND p2.data_iso >= %s AND p2.data_iso < %s), 0) AS peso_total "
+                "COALESCE(SUM(i.peso), 0) AS peso_total "
                 "FROM pedidos p "
-                "WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s "
+                "LEFT JOIN (SELECT pedido_id, SUM(peso_kg) AS peso FROM itens_pedido "
+                "           GROUP BY pedido_id) i ON i.pedido_id = p.id "
+                f"WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s{filtro} "
                 "GROUP BY p.tecido ORDER BY faturamento DESC",
-                (loja, de, ate_ex, loja, de, ate_ex),
+                (loja, de, ate_ex, *filtro_params),
             ).fetchall()
         ]
 
+        # Encalhado é estoque parado da LOJA: não depende do filtro de
+        # operador (um tecido que outro operador vendeu não está parado).
         encalhados = [
             r["nome_tecido"]
             for r in conn.execute(
@@ -1625,36 +1721,33 @@ def relatorio_loja():
                 (loja, loja, de, ate_ex),
             ).fetchall()
         ]
-
-        if ve_comissoes:
-            despesas_total, despesas_por_categoria = _despesas_resumo(conn, loja, de, ate_ex)
     finally:
         conn.close()
 
+    # Despesas e lucro são números do dono, com a mesma regra das comissões:
+    # o gerente não recebe nem a chave no JSON (_totais_loja já as omite).
     payload = dict(
         periodo={"de": de, "ate": ate},
-        faturamento_total=faturamento_total,
-        num_pedidos=num_pedidos,
-        ticket_medio=ticket_medio,
+        usuario_id=usuario_id,
+        **totais,
+        periodo_anterior={
+            "de": ant_de.strftime("%Y-%m-%d"),
+            "ate": ant_ate.strftime("%Y-%m-%d"),
+            **{k: v for k, v in anterior.items() if k != "despesas_por_categoria"},
+        },
+        serie_diaria=serie,
+        operadores=operadores,
         por_operador=por_operador,
         tecidos_mais_vendidos=tecidos[:5],
         tecidos_menos_vendidos=sorted(tecidos, key=lambda t: t["faturamento"])[:5],
         tecidos_encalhados=encalhados,
     )
     if ve_comissoes:
-        payload["comissoes_a_pagar"] = comissoes_a_pagar
-        # Despesas e lucro são números do dono, com a mesma regra das
-        # comissões: o gerente não recebe nem a chave no JSON.
-        payload["despesas_total"] = despesas_total
-        payload["despesas_por_categoria"] = despesas_por_categoria
         # Comissão também é saída do dono: entra no lucro, mas fica numa
         # linha própria no detalhe em vez de misturada às categorias.
-        saidas_total = round(despesas_total + comissoes_a_pagar, 2)
-        payload["saidas_total"] = saidas_total
         payload["saidas_detalhe"] = [
-            {"categoria": c["categoria"], "valor": c["total"]} for c in despesas_por_categoria
-        ] + [{"categoria": "Comissões (vendas)", "valor": comissoes_a_pagar}]
-        payload["lucro"] = round(faturamento_total - saidas_total, 2)
+            {"categoria": c["categoria"], "valor": c["total"]} for c in totais["despesas_por_categoria"]
+        ] + [{"categoria": "Comissões (vendas)", "valor": totais["comissoes_a_pagar"]}]
     return jsonify(**payload)
 
 @app.get("/api/relatorio/meu")
