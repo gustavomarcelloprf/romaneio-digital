@@ -115,7 +115,8 @@ def render_pedido_png(loja: dict, pedido: dict, itens: list) -> io.BytesIO:
     # <<< NOVO: Cálculo do peso total >>>
     peso_total = sum(it.get('peso_kg', 0) for it in itens)
     
-    total_desconto = pedido.get('desconto', 0.0)
+    # Pedidos novos gravam desconto 0; só os antigos ainda podem ter um.
+    total_desconto = pedido.get('desconto') or 0.0
     total_subtotal = sum(it.get('peso_kg', 0) * preco_unitario for it in itens)
     total_final = pedido.get('total', total_subtotal - total_desconto)
 
@@ -126,8 +127,11 @@ def render_pedido_png(loja: dict, pedido: dict, itens: list) -> io.BytesIO:
     draw_text_right_aligned(width - padding, current_y, f"Subtotal: {_fmt_brl(total_subtotal)}", FONT_REGULAR, COLOR_SECONDARY_TEXT)
     current_y += 25 * SCALE
     
-    draw_text_right_aligned(width - padding, current_y, f"Desconto: {_fmt_brl(total_desconto)}", FONT_REGULAR, COLOR_SECONDARY_TEXT)
-    current_y += 35 * SCALE
+    if total_desconto:
+        draw_text_right_aligned(width - padding, current_y, f"Desconto: {_fmt_brl(total_desconto)}", FONT_REGULAR, COLOR_SECONDARY_TEXT)
+        current_y += 35 * SCALE
+    else:
+        current_y += 10 * SCALE
     
     draw_text_right_aligned(width - padding, current_y, f"Total: {_fmt_brl(total_final)}", FONT_BOLD, COLOR_PRIMARY_TEXT)
 

@@ -7,6 +7,8 @@
     const state = {
         novoPedido: { itens: [] },
         pedidoEmEdicao: { id: null, itens: [] },
+        clientes: [],
+        estoque: [],
         entrada: { linhas: [], encomendaId: null },
         novaEncomenda: { itens: [] },
         loja: sessionStorage.getItem("loja_codigo") || "",
@@ -60,7 +62,7 @@
     // Carregamento sob demanda: ao abrir uma tela, seus dados são
     // reatualizados (o resto continua como está).
     function aoAbrirTela(id) {
-        if (id === "vender") loadOrcamentos();
+        if (id === "vender") loadStock();
         else if (id === "pedidos") loadOrders();
         else if (id === "clientes") loadClients();
         else if (id === "estoque") loadStock();
@@ -91,11 +93,16 @@
     }
 
     // --- Funções Utilitárias ---
+    // Regra única de número (igual à _parse_num do backend):
+    // vírgula e ponto -> ponto é milhar ("1.234,56"); só vírgula -> vírgula é
+    // decimal ("2,5"); só ponto -> ponto é decimal ("2.5", "1234.56").
     function ptbrToNumber(v) {
         if (typeof v === "number") return v;
-        if (!v) return null;
-        const s = String(v).replace(/[^\d,.-]/g, "").replace(/\./g, "").replace(",", ".");
-        const n = parseFloat(s);
+        if (v === null || v === undefined) return null;
+        let s = String(v).replace(/[^\d,.-]/g, "");
+        if (!s) return null;
+        if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+        const n = Number(s);
         return isNaN(n) ? null : n;
     }
 
@@ -158,12 +165,11 @@
     }
 
     // --- Funções de Renderização e Lógica de Negócio ---
-    function updateTotalPreview(itens, precoEl, descontoEl, totalEl) {
-        if (!totalEl || !precoEl || !descontoEl) return;
+    // Total = peso × preço (não há mais desconto).
+    function updateTotalPreview(itens, precoEl, totalEl) {
+        if (!totalEl || !precoEl) return;
         const preco = ptbrToNumber(precoEl.value) || 0;
-        const desconto = ptbrToNumber(descontoEl.value) || 0;
-        const subtotal = itens.reduce((acc, it) => acc + (it.peso || 0), 0) * preco;
-        const total = subtotal - desconto;
+        const total = itens.reduce((acc, it) => acc + (it.peso || 0), 0) * preco;
         totalEl.textContent = fmtBRL(total);
     }
 
@@ -202,6 +208,86 @@
         }
     }
 
+    // ===== Venda: cliente livre e tecido do estoque (ou "Outro") =====
+    const TECIDO_OUTRO = "__outro__";
+
+    function clienteCadastrado(nome) {
+        const alvo = String(nome || "").trim().toLocaleLowerCase("pt-BR");
+        if (!alvo) return null;
+        return state.clientes.find(c => c.nome.trim().toLocaleLowerCase("pt-BR") === alvo) || null;
+    }
+
+    // Nome igual ao de um cliente cadastrado -> cliente_id; outro nome ->
+    // cliente_avulso; em branco -> venda sem cliente.
+    function clienteDoCampo(nome) {
+        const c = clienteCadastrado(nome);
+        if (c) return { cliente_id: c.id };
+        const avulso = String(nome || "").trim();
+        return avulso ? { cliente_avulso: avulso } : {};
+    }
+
+    function atualizarAvisosVenda() {
+        const campo = $("#clienteNome"), hint = $("#clienteHint");
+        if (!campo || !hint) return;
+        const nome = campo.value.trim();
+        const cadastrado = clienteCadastrado(nome);
+        hint.textContent = !nome ? "Pode deixar em branco."
+            : cadastrado ? "Cliente cadastrado ✓"
+            : "Nome avulso (cliente não cadastrado).";
+        $("#fiadoAviso").hidden = !($("#fiado").checked && !cadastrado);
+    }
+
+    function renderTecidosVenda() {
+        const sel = $("#tecidoSelect");
+        if (!sel) return;
+        const atual = sel.value;
+        const nomes = state.estoque.map(t => t.nome_tecido);
+        sel.innerHTML = (nomes.length ? '<option value="">Escolha o tecido…</option>' : '') +
+            nomes.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('') +
+            `<option value="${TECIDO_OUTRO}">Outro (fora do estoque)…</option>`;
+        // Sem tecido no estoque, "Outro" é a única opção e já vem marcada.
+        sel.value = [...sel.options].some(o => o.value === atual) ? atual : (nomes.length ? "" : TECIDO_OUTRO);
+        aoTrocarTecido();
+    }
+
+    function aoTrocarTecido() {
+        const sel = $("#tecidoSelect");
+        if (!sel) return;
+        const outro = sel.value === TECIDO_OUTRO;
+        const inpOutro = $("#tecidoOutro");
+        inpOutro.hidden = !outro;
+        inpOutro.required = outro;
+        $("#descontarWrap").hidden = outro;
+        $("#tecidoOutroAviso").hidden = !outro;
+        // Sugere as cores do tecido escolhido no campo de cor dos itens.
+        const tecido = state.estoque.find(t => t.nome_tecido === sel.value);
+        $("#coresLista").innerHTML = (tecido?.cores || []).map(c => `<option value="${esc(c.nome_cor)}">`).join('');
+    }
+
+    function tecidoDaVenda() {
+        const valor = $("#tecidoSelect").value;
+        if (valor === TECIDO_OUTRO) return { nome: $("#tecidoOutro").value.trim(), avulso: true };
+        return { nome: valor, avulso: false };
+    }
+
+    function mostrarVendaSalva(criado, payload) {
+        const box = $("#vendaSucesso");
+        if (!box) return;
+        const cliente = payload.cliente_id
+            ? (state.clientes.find(c => c.id === payload.cliente_id)?.nome || "")
+            : (payload.cliente_avulso || "");
+        box.innerHTML = `
+            <p>✓ Venda #${esc(criado.id)} salva${cliente ? ` para ${esc(cliente)}` : ''}: ${esc(fmtBRL(criado.total))}${payload.pago ? '' : ' (fiado)'}.</p>
+            <div class="item-row">
+                <button type="button" class="btn-primary btn-sm" data-acao="whatsapp" data-id="${esc(criado.id)}">Enviar no WhatsApp</button>
+                <button type="button" class="btn-secondary btn-sm" data-acao="png" data-id="${esc(criado.id)}">Romaneio (imagem)</button>
+                <button type="button" class="btn-secondary btn-sm" data-acao="pdf" data-id="${esc(criado.id)}">Romaneio (PDF)</button>
+                <button type="button" class="btn-secondary btn-sm" data-acao="fechar">Fechar</button>
+            </div>`;
+        box.hidden = false;
+        box.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
     async function loadClients() {
         const clienteSearchInput = $("#clienteSearch");
         if(!clienteSearchInput) return;
@@ -212,9 +298,13 @@
         const [clientes, fiado] = await Promise.all(promessas);
 
         if (Array.isArray(clientes)) {
-            const optionsHtml = clientes.map(c => `<option value="${c.id}">${esc(c.nome)}</option>`).join("");
-            $("#clienteId").innerHTML = optionsHtml;
-            $("#editClienteId").innerHTML = optionsHtml;
+            // Sem busca a lista é completa: é ela que alimenta o campo de
+            // cliente da venda (e do modal de edição).
+            if (!searchTerm.trim()) {
+                state.clientes = clientes;
+                $("#clientesLista").innerHTML = clientes.map(c => `<option value="${esc(c.nome)}">`).join("");
+                atualizarAvisosVenda();
+            }
 
             const saldoPorCliente = new Map((fiado?.devedores || []).map(d => [d.cliente_id, d.saldo]));
 
@@ -641,35 +731,6 @@
         }
     }
 
-    // Orçamentos: pedidos com status 'orcamento' (sem baixa de estoque).
-    async function loadOrcamentos() {
-        const wrap = $("#orcamentosWrap");
-        if (!wrap || !pode("vender")) return;
-        try {
-            const orcamentos = await jfetch("/pedidos?status=orcamento");
-            wrap.innerHTML = orcamentos.length ? `
-            <table class="table">
-                <thead><tr><th>ID</th><th>Cliente</th><th>Tecido</th><th>Vendedor</th><th>Data</th><th>Total</th><th>Ações</th></tr></thead>
-                <tbody>${orcamentos.map(o => `
-                    <tr>
-                        <td>${esc(o.id)}</td>
-                        <td>${esc(o.cliente_nome)}</td>
-                        <td>${esc(o.tecido)}</td>
-                        <td>${esc(o.vendedor_nome || '')}</td>
-                        <td>${esc(new Date(o.data_iso).toLocaleString('pt-BR'))}</td>
-                        <td>${esc(fmtBRL(o.total))}</td>
-                        <td class="actions">
-                            <button class="btn-primary btn-sm converter-orcamento-btn" data-id="${esc(o.id)}" style="width:auto;">Converter em pedido</button>
-                            <button class="btn-secondary btn-danger btn-sm remove-orcamento-btn" data-id="${esc(o.id)}">Remover</button>
-                        </td>
-                    </tr>`).join('')}
-                </tbody>
-            </table>` : '<p class="muted">Nenhum orçamento em aberto.</p>';
-        } catch (err) {
-            wrap.innerHTML = `<p class="msg erro">Erro ao carregar orçamentos: ${esc(err.message)}</p>`;
-        }
-    }
-
     function renderEstoque(estoque) {
         const estoqueWrap = $("#estoqueWrap");
         if (!estoqueWrap) return;
@@ -733,7 +794,9 @@
     async function loadStock() {
         try {
             const estoque = await jfetch("/api/estoque");
+            state.estoque = estoque;
             renderEstoque(estoque);
+            renderTecidosVenda();
             // Sugestões de tecido na entrada: o backend recusa tecido não cadastrado.
             const dl = $("#entradaTecidos");
             if (dl) dl.innerHTML = estoque.map(t => `<option value="${esc(t.nome_tecido)}">`).join('');
@@ -866,16 +929,6 @@
     }
 
     // ===== Entrada de mercadoria (lote digitado ou planilha) =====
-    // Peso da entrada: com vírgula é pt-BR ("1.234,5"); sem vírgula o ponto é
-    // decimal ("12.5"), como o backend interpreta.
-    function pesoEntrada(v) {
-        if (typeof v === "number") return v;
-        const s = String(v ?? "").trim();
-        if (!s) return null;
-        if (s.includes(",")) return ptbrToNumber(s);
-        const n = parseFloat(s.replace(/[^\d.-]/g, ""));
-        return isNaN(n) ? null : n;
-    }
 
     function linhaEntradaVazia() {
         return { tecido: "", cor: "", peso: "", id_rolo: "" };
@@ -901,7 +954,7 @@
         const el = $("#entradaResumo");
         if (!el) return;
         const linhas = state.entrada.linhas;
-        const kg = linhas.reduce((acc, l) => acc + (pesoEntrada(l.peso) || 0), 0);
+        const kg = linhas.reduce((acc, l) => acc + (ptbrToNumber(l.peso) || 0), 0);
         el.textContent = linhas.length
             ? `${linhas.length} linha(s) · ${numberToPtbr(Math.round(kg * 1000) / 1000)} kg`
             : "";
@@ -960,7 +1013,7 @@
     async function confirmarEntrada() {
         const linhas = state.entrada.linhas.filter(l => l.tecido || l.cor || l.peso || l.id_rolo);
         if (!linhas.length) return msgEntrada(`<p class="msg erro">Adicione ao menos uma linha.</p>`);
-        const kg = linhas.reduce((acc, l) => acc + (pesoEntrada(l.peso) || 0), 0);
+        const kg = linhas.reduce((acc, l) => acc + (ptbrToNumber(l.peso) || 0), 0);
         const encomendaId = state.entrada.encomendaId;
         const rotulo = encomendaId ? "recebimento" : "entrada";
         if (!confirm(`Confirmar ${rotulo} de ${linhas.length} linha(s), total ${numberToPtbr(Math.round(kg * 1000) / 1000)} kg?`)) return;
@@ -1012,7 +1065,6 @@
             await Promise.all([
                 loadClients(),
                 loadOrders(),
-                loadOrcamentos(),
                 loadStock(),
                 loadRelatorios()
             ]);
@@ -1030,13 +1082,12 @@
             state.pedidoEmEdicao.id = pedido.id;
             state.pedidoEmEdicao.itens = itens.map(it => ({ cor: it.cor, peso: it.peso_kg }));
     
-            $("#editClienteId").value = pedido.cliente_id;
+            $("#editClienteNome").value = pedido.cliente_nome || "";
             $("#editTecido").value = pedido.tecido;
             $("#editPreco").value = numberToPtbr(pedido.preco_unitario);
-            $("#editDesconto").value = numberToPtbr(pedido.desconto);
     
             renderItens(state.pedidoEmEdicao.itens, $("#editItensWrap"), 'remove-edit-item');
-            updateTotalPreview(state.pedidoEmEdicao.itens, $("#editPreco"), $("#editDesconto"), $("#editTotalPreview"));
+            updateTotalPreview(state.pedidoEmEdicao.itens, $("#editPreco"), $("#editTotalPreview"));
             
             editModal.classList.add('is-visible');
         } catch (err) {
@@ -1098,7 +1149,7 @@
         const formPix = $("#formPix"), formCliente = $("#formCliente"), formUsuario = $("#formUsuario");
         const formPedido = $("#formPedido"), pedidosWrap = $("#pedidosWrap"), clientesWrap = $("#clientesWrap");
         const usuariosWrap = $("#usuariosWrap"), clienteSearchInput = $("#clienteSearch"), orderSortSelect = $("#orderSort");
-        const inpPreco = $("#preco"), inpDesconto = $("#desconto"), totalPreviewEl = $("#totalPreview");
+        const inpPreco = $("#preco"), totalPreviewEl = $("#totalPreview");
         const btnAddItem = $("#btnAddItem"), itensWrap = $("#itensWrap");
         const logoutBtn = $("#logoutBtn");
         const editModal = $("#editModal");
@@ -1393,61 +1444,38 @@
 
         formPedido?.addEventListener("submit", async e => {
             e.preventDefault();
-            if (state.novoPedido.itens.length === 0) return alert("Adicione pelo menos um item ao pedido.");
-            // "Salvar como orçamento" é o segundo botão submit do form.
-            const isOrcamento = e.submitter?.dataset.orcamento === "1";
+            if (state.novoPedido.itens.length === 0) return alert("Adicione pelo menos um item à venda.");
+            const tecido = tecidoDaVenda();
+            if (!tecido.nome) return alert("Informe o tecido.");
+            const cliente = clienteDoCampo($("#clienteNome").value);
+            const fiado = $("#fiado").checked;
+            if (fiado && !cliente.cliente_id) return alert("Venda fiado precisa de um cliente cadastrado: escolha um nome da lista.");
             const payload = {
-                cliente_id: $("#clienteId").value,
-                tecido: $("#tecido").value, preco_unitario: $("#preco").value,
-                desconto: $("#desconto").value, itens: state.novoPedido.itens,
-                // O estado do checkbox é sempre enviado (mesmo para orçamento):
-                // vira a intenção gravada, que a conversão respeita depois.
-                descontar_estoque: $("#descontar_estoque").checked,
-                pago: !$("#fiado").checked,
-                is_orcamento: isOrcamento
+                ...cliente,
+                tecido: tecido.nome, tecido_avulso: tecido.avulso,
+                preco_unitario: $("#preco").value, itens: state.novoPedido.itens,
+                // Tecido "Outro" não está no estoque: não há o que baixar.
+                descontar_estoque: !tecido.avulso && $("#descontar_estoque").checked,
+                pago: !fiado,
             };
+            const btn = e.submitter;
+            if (btn) btn.disabled = true;
             try {
-                await jfetch("/pedidos", { method: "POST", body: JSON.stringify(payload) });
+                const criado = await jfetch("/pedidos", { method: "POST", body: JSON.stringify(payload) });
+                // Fica na tela Vender: limpa o formulário e mostra o romaneio pronto.
                 state.novoPedido.itens = [];
                 formPedido.reset();
+                renderTecidosVenda();
                 renderItens(state.novoPedido.itens, itensWrap, 'remove-item');
-                updateTotalPreview(state.novoPedido.itens, inpPreco, inpDesconto, totalPreviewEl);
-                if (isOrcamento) {
-                    loadOrcamentos();
-                    alert('Orçamento salvo! O estoque NÃO foi descontado.');
-                } else {
-                    loadOrders();
-                    loadRelatorios();
-                    if (payload.descontar_estoque) loadStock();
-                    alert('Pedido salvo com sucesso!');
-                }
+                updateTotalPreview(state.novoPedido.itens, inpPreco, totalPreviewEl);
+                atualizarAvisosVenda();
+                mostrarVendaSalva(criado, payload);
+                loadOrders();
+                loadRelatorios();
+                if (payload.descontar_estoque) loadStock();
+                if (fiado) loadClients();
             } catch (err) { alert(`Erro ao salvar: ${err.message}`); }
-        });
-
-        $("#orcamentosWrap")?.addEventListener('click', async e => {
-            const btn = e.target.closest('button');
-            if (!btn?.dataset.id) return;
-            if (btn.classList.contains('converter-orcamento-btn')) {
-                if (!confirm('Converter este orçamento em pedido? O estoque será descontado agora.')) return;
-                btn.disabled = true;
-                try {
-                    await jfetch(`/pedidos/${btn.dataset.id}/converter`, { method: 'POST' });
-                    loadOrcamentos();
-                    loadOrders();
-                    loadStock();
-                    loadRelatorios();
-                    alert('Orçamento convertido em pedido.');
-                } catch (err) {
-                    btn.disabled = false;
-                    alert(`Não foi possível converter: ${err.message}`);
-                }
-            } else if (btn.classList.contains('remove-orcamento-btn')) {
-                if (!confirm('Remover este orçamento?')) return;
-                try {
-                    await jfetch(`/pedidos/${btn.dataset.id}`, { method: 'DELETE' });
-                    loadOrcamentos();
-                } catch (err) { alert(`Erro: ${err.message}`); }
-            }
+            finally { if (btn) btn.disabled = false; }
         });
 
         formPix?.addEventListener("submit", async e => {
@@ -1463,7 +1491,7 @@
         btnAddItem?.addEventListener("click", () => {
             addItem(state.novoPedido.itens, $("#cor"), $("#peso"), 
                 () => renderItens(state.novoPedido.itens, itensWrap, 'remove-item'),
-                () => updateTotalPreview(state.novoPedido.itens, inpPreco, inpDesconto, totalPreviewEl)
+                () => updateTotalPreview(state.novoPedido.itens, inpPreco, totalPreviewEl)
             );
         });
         
@@ -1471,11 +1499,23 @@
             if (e.target.classList.contains("remove-item")) {
                 state.novoPedido.itens.splice(parseInt(e.target.dataset.index, 10), 1);
                 renderItens(state.novoPedido.itens, itensWrap, 'remove-item');
-                updateTotalPreview(state.novoPedido.itens, inpPreco, inpDesconto, totalPreviewEl);
+                updateTotalPreview(state.novoPedido.itens, inpPreco, totalPreviewEl);
             }
         });
 
-        [inpPreco, inpDesconto].forEach(el => el?.addEventListener("input", () => updateTotalPreview(state.novoPedido.itens, inpPreco, inpDesconto, totalPreviewEl)));
+        inpPreco?.addEventListener("input", () => updateTotalPreview(state.novoPedido.itens, inpPreco, totalPreviewEl));
+        $("#tecidoSelect")?.addEventListener("change", aoTrocarTecido);
+        $("#clienteNome")?.addEventListener("input", atualizarAvisosVenda);
+        $("#fiado")?.addEventListener("change", atualizarAvisosVenda);
+        $("#vendaSucesso")?.addEventListener("click", e => {
+            const btn = e.target.closest("button");
+            if (!btn) return;
+            if (btn.dataset.acao === "fechar") { $("#vendaSucesso").hidden = true; return; }
+            const id = btn.dataset.id;
+            if (btn.dataset.acao === "png") window.open(`/exportar/${id}?type=png`, '_blank');
+            else if (btn.dataset.acao === "pdf") window.open(`/exportar/${id}?type=pdf`, '_blank');
+            else if (btn.dataset.acao === "whatsapp") enviarWhatsApp(id);
+        });
         
         clienteSearchInput?.addEventListener('keyup', loadClients);
         orderSortSelect?.addEventListener('change', loadOrders);
@@ -1726,7 +1766,7 @@
             $("#btnEditAddItem")?.addEventListener('click', () => {
                 addItem(state.pedidoEmEdicao.itens, $("#editCor"), $("#editPeso"), 
                     () => renderItens(state.pedidoEmEdicao.itens, $("#editItensWrap"), 'remove-edit-item'),
-                    () => updateTotalPreview(state.pedidoEmEdicao.itens, $("#editPreco"), $("#editDesconto"), $("#editTotalPreview"))
+                    () => updateTotalPreview(state.pedidoEmEdicao.itens, $("#editPreco"), $("#editTotalPreview"))
                 );
             });
             
@@ -1734,20 +1774,20 @@
                 if (e.target.classList.contains('remove-edit-item')) {
                     state.pedidoEmEdicao.itens.splice(parseInt(e.target.dataset.index, 10), 1);
                     renderItens(state.pedidoEmEdicao.itens, $("#editItensWrap"), 'remove-edit-item');
-                    updateTotalPreview(state.pedidoEmEdicao.itens, $("#editPreco"), $("#editDesconto"), $("#editTotalPreview"));
+                    updateTotalPreview(state.pedidoEmEdicao.itens, $("#editPreco"), $("#editTotalPreview"));
                 }
             });
               
-            [$("#editPreco"), $("#editDesconto")].forEach(el => el?.addEventListener("input", () => updateTotalPreview(state.pedidoEmEdicao.itens, $("#editPreco"), $("#editDesconto"), $("#editTotalPreview"))));
+            $("#editPreco")?.addEventListener("input", () => updateTotalPreview(state.pedidoEmEdicao.itens, $("#editPreco"), $("#editTotalPreview")));
 
             $("#formEditPedido")?.addEventListener('submit', async e => {
                 e.preventDefault();
                 const pedidoId = state.pedidoEmEdicao.id;
                 if (!pedidoId) return;
                 const payload = {
-                    cliente_id: $("#editClienteId").value,
+                    ...clienteDoCampo($("#editClienteNome").value),
                     tecido: $("#editTecido").value, preco_unitario: $("#editPreco").value,
-                    desconto: $("#editDesconto").value, itens: state.pedidoEmEdicao.itens,
+                    itens: state.pedidoEmEdicao.itens,
                 };
                 // NOTA: A edição não envia `descontar_estoque` e o backend não vai alterar o estoque.
                 try {

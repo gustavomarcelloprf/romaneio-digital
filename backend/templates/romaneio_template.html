@@ -153,10 +153,12 @@
                     <td>Subtotal:</td>
                     <td>{{ format_brl(subtotal) }}</td>
                 </tr>
+                {% if pedido.desconto %}
                 <tr>
                     <td>Desconto:</td>
                     <td>{{ format_brl(pedido.desconto) }}</td>
                 </tr>
+                {% endif %}
                 <tr class="grand-total">
                     <td>Total:</td>
                     <td>{{ format_brl(pedido.total) }}</td>

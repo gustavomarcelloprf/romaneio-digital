@@ -207,6 +207,8 @@ h4 { font-size: 16px; margin: 0; }
     gap: 8px;
     margin-top: 16px;
 }
+.form-group-checkbox[hidden] { display: none; }
+#tecidoOutro { margin-top: 8px; }
 .form-group-checkbox input[type="checkbox"] {
     width: auto;
     height: 16px;
@@ -278,6 +280,19 @@ button {
 }
 .msg.erro { color: #dc2626; }
 .msg.ok { color: #15803d; }
+
+/* Aviso de venda salva: fica na tela Vender com os atalhos do romaneio. */
+.venda-sucesso {
+  border: 1px solid #86efac;
+  background: #f0fdf4;
+  color: #14532d;
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin: 0 0 16px;
+}
+.venda-sucesso p { margin: 0 0 8px; font-weight: 600; }
+.venda-sucesso .item-row { margin-top: 0; }
+.venda-sucesso button { width: auto; }
 
 /* Itens e Totais */
 .item-row {

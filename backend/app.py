@@ -114,12 +114,21 @@ def permissoes_do_papel(papel):
 # -----------------------------------------------------------------------------
 # Funções Helper
 # -----------------------------------------------------------------------------
-def _ptbr_to_float(val):
-    if val is None: return None
+def _parse_num(val):
+    """Número digitado ou de planilha (peso, preço, valor) -> float, ou None.
+
+    Regra única do sistema (o front usa a mesma em ptbrToNumber):
+    - vírgula e ponto: ponto é milhar, vírgula é decimal ('1.234,56' -> 1234.56);
+    - só vírgula: vírgula é decimal ('2,5' -> 2.5);
+    - só ponto: ponto é decimal ('2.5' -> 2.5, '1234.56' -> 1234.56).
+    """
+    if val is None or isinstance(val, bool): return None
     if isinstance(val, (int, float)): return float(val)
-    s = re.sub(r"[^\d,.\-]", "", str(val).strip()).replace(".", "").replace(",", ".")
+    s = re.sub(r"[^\d,.\-]", "", str(val).strip())
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
     try: return float(s)
-    except (ValueError, TypeError): return None
+    except ValueError: return None
 
 class EstoqueInsuficiente(Exception):
     """Venda que o estoque não cobre: aborta a transação com mensagem clara (409)."""
@@ -454,7 +463,7 @@ def _saldo_cliente(conn, loja, cliente_id):
 def cliente_pagamento_criar(cliente_id: int):
     loja = current_loja()
     data = request.get_json(silent=True) or {}
-    valor = _ptbr_to_float(data.get("valor"))
+    valor = _parse_num(data.get("valor"))
     data_pagamento = (data.get("data") or "").strip()
     if valor is None or valor <= 0:
         return jsonify(error="Valor do pagamento deve ser maior que zero."), 400
@@ -580,7 +589,7 @@ def usuarios_api():
         data = request.get_json(silent=True) or {}
         nome = (data.get("nome") or "").strip()
         login = (data.get("login") or "").strip()
-        taxa = _ptbr_to_float(data.get("taxa_comissao"))
+        taxa = _parse_num(data.get("taxa_comissao"))
         if taxa is None: taxa = 0.0
         if not nome or not login:
             conn.close(); return jsonify(error="Nome e login são obrigatórios."), 400
@@ -623,7 +632,7 @@ def usuario_update_api(usuario_id: int):
             return jsonify(error="Usuário não encontrado."), 404
 
         nome = (data.get("nome") or "").strip() or alvo["nome"]
-        taxa = _ptbr_to_float(data.get("taxa_comissao"))
+        taxa = _parse_num(data.get("taxa_comissao"))
         if taxa is None: taxa = alvo["taxa_comissao"]
         if taxa < 0:
             return jsonify(error="Taxa de comissão não pode ser negativa."), 400
@@ -694,6 +703,40 @@ def usuario_reconvite_api(usuario_id: int):
 # -----------------------------------------------------------------------------
 # API: Pedidos com Lógica de Estoque
 # -----------------------------------------------------------------------------
+def _cliente_da_venda(conn, loja, data):
+    """(cliente_id, cliente_avulso, erro) a partir do payload da venda.
+
+    O cliente é opcional: cadastrado (cliente_id, validado contra a loja),
+    nome avulso digitado (cliente_avulso) ou nenhum. Se vier cliente_id, o
+    nome avulso é ignorado.
+    """
+    cliente_id = data.get("cliente_id")
+    if cliente_id in (None, ""):
+        avulso = str(data.get("cliente_avulso") or "").strip() or None
+        return None, avulso, None
+    try:
+        cliente_id = int(cliente_id)
+    except (TypeError, ValueError):
+        return None, None, "Cliente inválido para esta loja."
+    if not conn.execute("SELECT 1 FROM clientes WHERE id = %s AND loja = %s", (cliente_id, loja)).fetchone():
+        return None, None, "Cliente inválido para esta loja."
+    return cliente_id, None, None
+
+def _itens_da_venda(itens_in):
+    """[(cor, peso)] com o peso já convertido, ou None se alguma linha for inválida."""
+    if not isinstance(itens_in, list) or not itens_in:
+        return None
+    itens = []
+    for it in itens_in:
+        peso = _parse_num(it.get("peso")) if isinstance(it, dict) else None
+        if peso is None or peso <= 0:
+            return None
+        itens.append(((it.get("cor") or "").strip(), peso))
+    return itens
+
+FIADO_SEM_CLIENTE = ("Venda fiado precisa de um cliente cadastrado, para a dívida ficar "
+                     "registrada no nome dele. Escolha um cliente da lista ou cadastre-o antes.")
+
 @app.route("/pedidos", methods=["GET", "POST"])
 @require_login
 def pedidos_api():
@@ -703,70 +746,66 @@ def pedidos_api():
         sort_by = request.args.get("sort", "data_desc")
         order_options = {"data_desc": "p.id DESC", "data_asc": "p.id ASC", "cliente_asc": "cliente_nome ASC, p.id DESC", "total_desc": "p.total DESC", "total_asc": "p.total ASC"}
         order_clause = order_options.get(sort_by, "p.id DESC")
-        # ?status=orcamento lista os orçamentos; o default são os pedidos.
-        status = "orcamento" if request.args.get("status") == "orcamento" else "pedido"
-        sql = f"SELECT p.id, p.data_iso, p.tecido, p.total, p.desconto, p.comissao_valor, p.status, c.nome AS cliente_nome, COALESCE(u.nome, '') AS vendedor_nome FROM pedidos p JOIN clientes c ON c.id = p.cliente_id LEFT JOIN usuarios u ON u.id = p.usuario_id WHERE p.loja = %s AND p.status = %s ORDER BY {order_clause} LIMIT 200"
-        pedidos_raw = conn.execute(sql, (loja, status)).fetchall()
+        # LEFT JOIN: venda com cliente avulso (ou sem cliente) também aparece.
+        sql = f"SELECT p.id, p.data_iso, p.tecido, p.total, p.comissao_valor, p.pago, COALESCE(c.nome, p.cliente_avulso, '') AS cliente_nome, COALESCE(u.nome, '') AS vendedor_nome FROM pedidos p LEFT JOIN clientes c ON c.id = p.cliente_id LEFT JOIN usuarios u ON u.id = p.usuario_id WHERE p.loja = %s ORDER BY {order_clause} LIMIT 200"
+        pedidos_raw = conn.execute(sql, (loja,)).fetchall()
         pedidos = [dict(p) for p in pedidos_raw]
         conn.close()
         return jsonify(pedidos)
-    
+
     if request.method == "POST":
         if not pode("vender"):
             conn.close()
             return jsonify(error="Acesso restrito: permissão insuficiente."), 403
         data = request.get_json(silent=True) or {}
-        cliente_id = data.get("cliente_id")
-        preco_unitario = _ptbr_to_float(data.get("preco_unitario"))
-        itens_in = data.get("itens") or []
-        # Intenção gravada no pedido: para orçamento, não baixa agora, mas
-        # a conversão (POST /pedidos/<id>/converter) respeita esse valor depois.
-        descontar_estoque = data.get("descontar_estoque") in (True, 1, "1", "true", "True")
-        # Orçamento: não baixa estoque e não congela comissão (fica 0 até a
-        # conversão em POST /pedidos/<id>/converter).
-        is_orcamento = data.get("is_orcamento") in (True, 1, "1", "true")
+        preco_unitario = _parse_num(data.get("preco_unitario"))
+        itens = _itens_da_venda(data.get("itens"))
         tecido_nome = (data.get("tecido") or "").strip()
+        # Tecido "Outro" (fora do estoque): não há o que baixar.
+        tecido_avulso = data.get("tecido_avulso") in (True, 1, "1", "true", "True")
+        descontar_estoque = (not tecido_avulso) and data.get("descontar_estoque") in (True, 1, "1", "true", "True")
         # Fiado é só forma de pagamento: não muda baixa de estoque nem comissão.
         pago = 0 if data.get("pago", True) in (0, False, "0", "false", "False") else 1
 
-        if not all([cliente_id, preco_unitario is not None, itens_in, tecido_nome]):
+        if preco_unitario is None or preco_unitario < 0 or not itens or not tecido_nome:
             conn.close()
-            return jsonify(error="Dados incompletos."), 400
+            return jsonify(error="Dados incompletos: informe tecido, preço e ao menos um item com peso."), 400
 
-        if not conn.execute("SELECT 1 FROM clientes WHERE id = %s AND loja = %s", (cliente_id, loja)).fetchone():
+        cliente_id, cliente_avulso, erro = _cliente_da_venda(conn, loja, data)
+        if erro:
             conn.close()
-            return jsonify(error="Cliente inválido para esta loja."), 400
+            return jsonify(error=erro), 400
+        if not pago and not cliente_id:
+            conn.close()
+            return jsonify(error=FIADO_SEM_CLIENTE), 400
 
-        total_kg = sum(_ptbr_to_float(it.get("peso", 0)) for it in itens_in)
-        desconto = _ptbr_to_float(data.get("desconto")) or 0.0
-        total = round((total_kg * preco_unitario) - desconto, 2)
+        total_kg = sum(peso for _, peso in itens)
+        total = round(total_kg * preco_unitario, 2)
 
         # O vendedor é sempre o usuário logado; a comissão é congelada aqui
         # com a taxa vigente — mudanças futuras não afetam este pedido.
         usuario_id = session.get("usuario_id")
-        if is_orcamento:
-            comissao_taxa = comissao_valor = 0.0
-        else:
-            comissao_taxa = _taxa_comissao(get_usuario_by_id(usuario_id))
-            comissao_valor = round(total * comissao_taxa / 100, 2)
-        status = "orcamento" if is_orcamento else "pedido"
+        comissao_taxa = _taxa_comissao(get_usuario_by_id(usuario_id))
+        comissao_valor = round(total * comissao_taxa / 100, 2)
 
         try:
-            if descontar_estoque and not is_orcamento:
-                _baixar_estoque(conn, loja, tecido_nome,
-                                [(it.get("cor"), _ptbr_to_float(it.get("peso", 0))) for it in itens_in])
+            if descontar_estoque:
+                _baixar_estoque(conn, loja, tecido_nome, itens)
 
             now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
+            # desconto: coluna mantida só por causa dos pedidos antigos.
             cur_pedido = conn.execute(
-                "INSERT INTO pedidos (cliente_id, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor, pago, status, descontar_estoque) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                (cliente_id, tecido_nome, len(itens_in), preco_unitario, total, desconto, loja, now_iso, usuario_id, comissao_taxa, comissao_valor, pago, status, int(descontar_estoque))
+                "INSERT INTO pedidos (cliente_id, cliente_avulso, tecido, quantidade, preco_unitario, total, desconto, loja, data_iso, usuario_id, comissao_taxa, comissao_valor, pago, descontar_estoque) VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                (cliente_id, cliente_avulso, tecido_nome, len(itens), preco_unitario, total, loja, now_iso, usuario_id, comissao_taxa, comissao_valor, pago, int(descontar_estoque))
             )
             pedido_id = cur_pedido.fetchone()["id"]
 
-            itens_to_insert = [(pedido_id, tecido_nome, it.get("cor"), _ptbr_to_float(it.get("peso"))) for it in itens_in]
             with conn.cursor() as cur_itens:
-                cur_itens.executemany("INSERT INTO itens_pedido (pedido_id, descricao, cor, peso_kg) VALUES (%s, %s, %s, %s)", itens_to_insert)
-            
+                cur_itens.executemany(
+                    "INSERT INTO itens_pedido (pedido_id, descricao, cor, peso_kg) VALUES (%s, %s, %s, %s)",
+                    [(pedido_id, tecido_nome, cor, peso) for cor, peso in itens],
+                )
+
             conn.commit()
         except EstoqueInsuficiente as e:
             conn.rollback()
@@ -777,59 +816,7 @@ def pedidos_api():
         finally:
             conn.close()
 
-        return jsonify(id=pedido_id, total=total, status=status), 201
-
-@app.post("/pedidos/<int:pedido_id>/converter")
-@require_login
-@require_perm("vender")
-def pedido_converter_api(pedido_id: int):
-    """Orçamento -> pedido: baixa o estoque (mesma validação por peso) e
-    congela a comissão pela taxa ATUAL de quem fez o orçamento."""
-    loja = current_loja()
-    conn = get_conn()
-    try:
-        # FOR UPDATE: trava a linha do orçamento já na leitura, para duas
-        # conversões simultâneas não baixarem o estoque duas vezes.
-        pedido = conn.execute(
-            "SELECT id, tecido, total, usuario_id, status, descontar_estoque FROM pedidos WHERE id = %s AND loja = %s FOR UPDATE",
-            (pedido_id, loja),
-        ).fetchone()
-        if not pedido:
-            conn.rollback()
-            return jsonify(error="Orçamento não encontrado."), 404
-        if pedido["status"] != "orcamento":
-            conn.rollback()
-            return jsonify(error="Este pedido já foi convertido."), 409
-
-        # Venda casada (tecido não rastreado em estoque): o orçamento nasceu
-        # com descontar_estoque=0 e a conversão não deve tocar no estoque.
-        if pedido["descontar_estoque"]:
-            itens = conn.execute("SELECT cor, peso_kg FROM itens_pedido WHERE pedido_id = %s", (pedido_id,)).fetchall()
-            _baixar_estoque(conn, loja, pedido["tecido"], [(i["cor"], i["peso_kg"]) for i in itens])
-
-        vendedor = get_usuario_by_id(pedido["usuario_id"]) if pedido["usuario_id"] else None
-        comissao_taxa = _taxa_comissao(vendedor)
-        comissao_valor = round((pedido["total"] or 0) * comissao_taxa / 100, 2)
-        # A venda acontece na conversão: data_iso passa a ser agora, para o
-        # pedido cair no período certo dos relatórios.
-        now_iso = datetime.now().strftime("%Y-%m-%d %H:%M")
-        cur = conn.execute(
-            "UPDATE pedidos SET status = 'pedido', comissao_taxa = %s, comissao_valor = %s, data_iso = %s "
-            "WHERE id = %s AND loja = %s AND status = 'orcamento'",
-            (comissao_taxa, comissao_valor, now_iso, pedido_id, loja),
-        )
-        if cur.rowcount != 1:
-            raise EstoqueInsuficiente("Este pedido já foi convertido.")
-        conn.commit()
-    except EstoqueInsuficiente as e:
-        conn.rollback()
-        return jsonify(error=str(e)), 409
-    except psycopg.Error as e:
-        conn.rollback()
-        return jsonify(error=f"Erro de banco de dados: {e}"), 500
-    finally:
-        conn.close()
-    return jsonify(ok=True, id=pedido_id, status="pedido", comissao_valor=comissao_valor)
+        return jsonify(id=pedido_id, total=total), 201
 
 @app.route("/pedidos/<int:pedido_id>", methods=["GET", "PUT", "DELETE"])
 @require_login
@@ -841,7 +828,7 @@ def pedido_single_api(pedido_id: int):
         if not pedido:
             conn.close(); return jsonify(error="Pedido não encontrado."), 404
         conn.close(); return jsonify(pedido=dict(pedido), itens=itens)
-        
+
     if request.method == "DELETE":
         try:
             cur = conn.execute("DELETE FROM pedidos WHERE id = %s AND loja = %s", (pedido_id, loja))
@@ -852,43 +839,48 @@ def pedido_single_api(pedido_id: int):
             conn.rollback(); return jsonify(error=f"Erro no banco de dados: {e}"), 500
         finally: conn.close()
         return jsonify(ok=True)
-    
+
     if request.method == "PUT":
         data = request.get_json(silent=True) or {}
         # NOTA: A lógica aqui NÃO afeta o estoque. É apenas para correção de dados do romaneio.
         try:
-            cliente_id = data.get("cliente_id")
             tecido_nome = (data.get("tecido") or "").strip()
-            preco_unitario = _ptbr_to_float(data.get("preco_unitario"))
-            desconto = _ptbr_to_float(data.get("desconto")) or 0.0
-            itens_in = data.get("itens") or []
+            preco_unitario = _parse_num(data.get("preco_unitario"))
+            itens = _itens_da_venda(data.get("itens"))
+            if preco_unitario is None or preco_unitario < 0 or not itens or not tecido_nome:
+                return jsonify(error="Dados incompletos: informe tecido, preço e ao menos um item com peso."), 400
 
-            total_kg = sum(_ptbr_to_float(it.get("peso", 0)) for it in itens_in)
-            total = round((total_kg * preco_unitario) - desconto, 2)
+            atual = conn.execute("SELECT pago FROM pedidos WHERE id = %s AND loja = %s", (pedido_id, loja)).fetchone()
+            if not atual:
+                return jsonify(error="Pedido não encontrado."), 404
+            cliente_id, cliente_avulso, erro = _cliente_da_venda(conn, loja, data)
+            if erro:
+                return jsonify(error=erro), 400
+            # Pedido fiado não pode perder o cliente cadastrado: a dívida é dele.
+            if not atual["pago"] and not cliente_id:
+                return jsonify(error=FIADO_SEM_CLIENTE), 400
 
-            if not conn.execute("SELECT 1 FROM clientes WHERE id = %s AND loja = %s", (cliente_id, loja)).fetchone():
-                return jsonify(error="Cliente inválido para esta loja."), 400
+            total = round(sum(peso for _, peso in itens) * preco_unitario, 2)
 
             # O vendedor (usuario_id) não muda na edição; a comissão é
             # recalculada sobre o novo total usando a taxa JÁ CONGELADA
-            # no pedido, não a taxa atual do usuário.
-            cur = conn.execute("""
-                UPDATE pedidos SET cliente_id=%s, tecido=%s, preco_unitario=%s, desconto=%s, total=%s,
+            # no pedido, não a taxa atual do usuário. A edição zera o
+            # desconto legado: o total passa a ser peso × preço.
+            conn.execute("""
+                UPDATE pedidos SET cliente_id=%s, cliente_avulso=%s, tecido=%s, preco_unitario=%s, desconto=0, total=%s,
                     comissao_valor = ROUND((%s * comissao_taxa / 100)::numeric, 2)
                 WHERE id=%s AND loja=%s
-            """, (cliente_id, tecido_nome, preco_unitario, desconto, total, total, pedido_id, loja))
-            if cur.rowcount == 0:
-                conn.rollback()
-                return jsonify(error="Pedido não encontrado."), 404
+            """, (cliente_id, cliente_avulso, tecido_nome, preco_unitario, total, total, pedido_id, loja))
 
             conn.execute("DELETE FROM itens_pedido WHERE pedido_id=%s", (pedido_id,))
-            
-            itens_to_insert = [(pedido_id, tecido_nome, it.get("cor"), _ptbr_to_float(it.get("peso"))) for it in itens_in]
             with conn.cursor() as cur_itens:
-                cur_itens.executemany("INSERT INTO itens_pedido (pedido_id, descricao, cor, peso_kg) VALUES (%s, %s, %s, %s)", itens_to_insert)
-            
+                cur_itens.executemany(
+                    "INSERT INTO itens_pedido (pedido_id, descricao, cor, peso_kg) VALUES (%s, %s, %s, %s)",
+                    [(pedido_id, tecido_nome, cor, peso) for cor, peso in itens],
+                )
+
             conn.commit()
-            return jsonify(ok=True, message="Pedido atualizado.")
+            return jsonify(ok=True, message="Pedido atualizado.", total=total)
         except psycopg.Error as e:
             conn.rollback()
             return jsonify(error=f"Erro no banco de dados: {e}"), 500
@@ -953,7 +945,7 @@ def add_cor_estoque():
     data = request.get_json()
     tecido_id = data.get("tecido_id")
     nome_cor = (data.get("nome_cor") or "").strip()
-    peso_kg = _ptbr_to_float(data.get("peso_kg")) or 0
+    peso_kg = _parse_num(data.get("peso_kg")) or 0
     qtd_pecas = data.get("qtd_pecas") or 0
     
     if not all([tecido_id, nome_cor]):
@@ -1021,7 +1013,7 @@ def delete_cor(cor_id):
 def update_cor_estoque(cor_id):
     loja = current_loja()
     data = request.get_json()
-    novo_peso_kg = _ptbr_to_float(data.get("peso_kg"))
+    novo_peso_kg = _parse_num(data.get("peso_kg"))
     novas_qtd_pecas = data.get("qtd_pecas")
 
     if novo_peso_kg is None or novas_qtd_pecas is None or novo_peso_kg < 0 or novas_qtd_pecas < 0:
@@ -1050,7 +1042,7 @@ def update_cor_estoque(cor_id):
 def update_cor_minimo(cor_id):
     loja = current_loja()
     data = request.get_json(silent=True) or {}
-    minimo = _peso_to_float(data.get("estoque_minimo"))
+    minimo = _parse_num(data.get("estoque_minimo"))
     if minimo is None or minimo < 0:
         return jsonify(error="Estoque mínimo é obrigatório e não pode ser negativo (0 desliga o alerta)."), 400
 
@@ -1086,21 +1078,6 @@ _COLUNAS_PLANILHA = {
     "idrolo": "id_rolo", "iddorolo": "id_rolo", "rolo": "id_rolo", "rollid": "id_rolo",
 }
 
-def _peso_to_float(val):
-    """Peso vindo de digitação ou planilha: aceita '12,5', '1.234,5' e '12.5'.
-
-    _ptbr_to_float trata todo ponto como milhar ('12.5' -> 125), o que é
-    perigoso para CSV exportado com ponto decimal. Aqui, sem vírgula, o ponto
-    é decimal.
-    """
-    if val is None: return None
-    if isinstance(val, bool): return None
-    if isinstance(val, (int, float)): return float(val)
-    s = str(val).strip()
-    if "," in s: return _ptbr_to_float(s)
-    try: return float(re.sub(r"[^\d.\-]", "", s))
-    except ValueError: return None
-
 def _normalizar_cabecalho(nome):
     s = unicodedata.normalize("NFKD", str(nome or "")).encode("ascii", "ignore").decode()
     return re.sub(r"[^a-z0-9]", "", s.lower())
@@ -1119,7 +1096,7 @@ def _validar_linhas_entrada(linhas_in):
             erros.append({"linha": i, "erro": "Linha inválida."}); continue
         tecido = _texto_celula(it.get("tecido"))
         cor = _texto_celula(it.get("cor"))
-        peso = _peso_to_float(it.get("peso"))
+        peso = _parse_num(it.get("peso"))
         id_rolo = _texto_celula(it.get("id_rolo")) or None
         faltando = [n for n, v in (("tecido", tecido), ("cor", cor)) if not v]
         if faltando:
@@ -1317,7 +1294,7 @@ def _validar_itens_encomenda(itens_in):
             erros.append({"linha": i, "erro": "Item inválido."}); continue
         tecido = _texto_celula(it.get("tecido"))
         cor = _texto_celula(it.get("cor"))
-        peso_previsto = _peso_to_float(it.get("peso_previsto"))
+        peso_previsto = _parse_num(it.get("peso_previsto"))
         rolos_previstos_raw = it.get("rolos_previstos")
         faltando = [n for n, v in (("tecido", tecido), ("cor", cor)) if not v]
         if faltando:
@@ -1350,7 +1327,7 @@ def _validar_linhas_recebimento(linhas_in, itens_validos):
                 erros.append({"linha": i, "erro": "Item não pertence a esta encomenda."}); continue
         tecido = _texto_celula(it.get("tecido"))
         cor = _texto_celula(it.get("cor"))
-        peso = _peso_to_float(it.get("peso"))
+        peso = _parse_num(it.get("peso"))
         id_rolo = _texto_celula(it.get("id_rolo")) or None
         faltando = [n for n, v in (("tecido", tecido), ("cor", cor)) if not v]
         if faltando:
@@ -1581,7 +1558,7 @@ def relatorio_loja():
     try:
         tot = conn.execute(
             "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat "
-            "FROM pedidos WHERE loja = %s AND status = 'pedido' AND data_iso >= %s AND data_iso < %s",
+            "FROM pedidos WHERE loja = %s AND data_iso >= %s AND data_iso < %s",
             (loja, de, ate_ex),
         ).fetchone()
         num_pedidos = tot["n"]
@@ -1593,7 +1570,7 @@ def relatorio_loja():
             conn.execute(
                 "SELECT COALESCE(SUM(p.comissao_valor), 0) AS com FROM pedidos p "
                 "LEFT JOIN usuarios u ON u.id = p.usuario_id "
-                "WHERE p.loja = %s AND p.status = 'pedido' AND p.data_iso >= %s AND p.data_iso < %s "
+                "WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s "
                 "AND COALESCE(u.papel, '') != 'admin'",
                 (loja, de, ate_ex),
             ).fetchone()["com"],
@@ -1612,7 +1589,7 @@ def relatorio_loja():
                 "SELECT p.usuario_id, COALESCE(u.nome, '') AS nome, COUNT(*) AS num_pedidos, "
                 "COALESCE(SUM(p.total), 0) AS faturamento, COALESCE(SUM(p.comissao_valor), 0) AS comissao "
                 "FROM pedidos p LEFT JOIN usuarios u ON u.id = p.usuario_id "
-                "WHERE p.loja = %s AND p.status = 'pedido' AND p.data_iso >= %s AND p.data_iso < %s "
+                "WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s "
                 "GROUP BY p.usuario_id, u.nome ORDER BY faturamento DESC",
                 (loja, de, ate_ex),
             ).fetchall()
@@ -1628,10 +1605,10 @@ def relatorio_loja():
                 "SELECT p.tecido, COALESCE(SUM(p.total), 0) AS faturamento, "
                 "COALESCE((SELECT SUM(i.peso_kg) FROM itens_pedido i "
                 "          JOIN pedidos p2 ON p2.id = i.pedido_id "
-                "          WHERE p2.loja = %s AND p2.status = 'pedido' AND p2.tecido = p.tecido "
+                "          WHERE p2.loja = %s AND p2.tecido = p.tecido "
                 "            AND p2.data_iso >= %s AND p2.data_iso < %s), 0) AS peso_total "
                 "FROM pedidos p "
-                "WHERE p.loja = %s AND p.status = 'pedido' AND p.data_iso >= %s AND p.data_iso < %s "
+                "WHERE p.loja = %s AND p.data_iso >= %s AND p.data_iso < %s "
                 "GROUP BY p.tecido ORDER BY faturamento DESC",
                 (loja, de, ate_ex, loja, de, ate_ex),
             ).fetchall()
@@ -1643,7 +1620,7 @@ def relatorio_loja():
                 "SELECT nome_tecido FROM estoque_tecidos "
                 "WHERE loja = %s AND nome_tecido NOT IN ("
                 "  SELECT DISTINCT tecido FROM pedidos "
-                "  WHERE loja = %s AND status = 'pedido' AND data_iso >= %s AND data_iso < %s AND tecido IS NOT NULL"
+                "  WHERE loja = %s AND data_iso >= %s AND data_iso < %s AND tecido IS NOT NULL"
                 ") ORDER BY nome_tecido",
                 (loja, loja, de, ate_ex),
             ).fetchall()
@@ -1690,7 +1667,7 @@ def relatorio_meu():
     try:
         tot = conn.execute(
             "SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS fat, COALESCE(SUM(comissao_valor), 0) AS com "
-            "FROM pedidos WHERE loja = %s AND usuario_id = %s AND status = 'pedido' AND data_iso >= %s AND data_iso < %s",
+            "FROM pedidos WHERE loja = %s AND usuario_id = %s AND data_iso >= %s AND data_iso < %s",
             (loja, usuario_id, de, ate_ex),
         ).fetchone()
         ultimos = [
@@ -1702,9 +1679,9 @@ def relatorio_meu():
                 "comissao_valor": round(r["comissao_valor"] or 0, 2),
             }
             for r in conn.execute(
-                "SELECT p.id, p.data_iso, COALESCE(c.nome, '') AS cliente_nome, p.total, p.comissao_valor "
+                "SELECT p.id, p.data_iso, COALESCE(c.nome, p.cliente_avulso, '') AS cliente_nome, p.total, p.comissao_valor "
                 "FROM pedidos p LEFT JOIN clientes c ON c.id = p.cliente_id "
-                "WHERE p.loja = %s AND p.usuario_id = %s AND p.status = 'pedido' AND p.data_iso >= %s AND p.data_iso < %s "
+                "WHERE p.loja = %s AND p.usuario_id = %s AND p.data_iso >= %s AND p.data_iso < %s "
                 "ORDER BY p.id DESC LIMIT 10",
                 (loja, usuario_id, de, ate_ex),
             ).fetchall()
@@ -1775,8 +1752,8 @@ def _parse_data_despesa(val):
 def _parse_valor_despesa(val):
     """Número da planilha em pt-BR ('1.234,56', 'R$ 45,90') ou ponto decimal ('45.90').
 
-    Diferente de _ptbr_to_float, não descarta o ponto às cegas: CSVs gerados
-    por sistemas costumam usar '45.90', que viraria 4590.
+    Como _parse_num, '45.90' é 45,90; a diferença é que aqui '1.500' (ponto
+    seguido de exatamente 3 dígitos) é milhar, como numa planilha brasileira.
     """
     if isinstance(val, bool) or val is None:
         return None

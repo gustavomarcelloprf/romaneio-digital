@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Romaneio Digital</title>
     <!-- A versão foi incrementada para forçar a atualização do cache dos arquivos CSS/JS -->
-    <link rel="stylesheet" href="../css/style.css?v=33" />
+    <link rel="stylesheet" href="../css/style.css?v=34" />
 </head>
 <body>
     <div class="app-shell">
@@ -35,49 +35,54 @@
                 <!-- ====== Tela: Vender (inicial) ====== -->
                 <section class="view card" id="view-vender" hidden>
                     <h2>Vender</h2>
+                    <!-- Depois de salvar a venda fica aqui mesmo: o aviso traz o romaneio (PNG/PDF/WhatsApp). -->
+                    <div id="vendaSucesso" class="venda-sucesso" role="status" hidden></div>
                     <form id="formPedido">
                         <div class="grid">
-                            <div class="form-group"><label>Cliente *<select id="clienteId" name="cliente_id" required></select></label></div>
-                            <div class="form-group"><label>Tecido *<input id="tecido" name="tecido" required placeholder="Nome exato do tecido em estoque"></label></div>
-                            <div class="form-group"><label>Preço unitário (R$/kg) *<input id="preco" name="preco_unitario" inputmode="decimal" placeholder="Ex.: 25,90" required></label></div>
-                            <div class="form-group" style="grid-column: 1 / -1;"><label>Desconto (R$)<input id="desconto" name="desconto" placeholder="0,00" type="text"></label></div>
+                            <div class="form-group">
+                                <label>Cliente (opcional)<input id="clienteNome" list="clientesLista" autocomplete="off" placeholder="Escolha da lista ou digite um nome"></label>
+                                <small id="clienteHint" class="muted">Pode deixar em branco.</small>
+                            </div>
+                            <div class="form-group">
+                                <label>Tecido *<select id="tecidoSelect" required></select></label>
+                                <input id="tecidoOutro" placeholder="Qual tecido?" hidden>
+                            </div>
+                            <div class="form-group"><label>Preço por kg (R$) *<input id="preco" name="preco_unitario" inputmode="decimal" placeholder="Ex.: 25,90" required></label></div>
                         </div>
+                        <datalist id="clientesLista"></datalist>
+                        <datalist id="coresLista"></datalist>
 
                         <div class="card-inset">
-                            <strong>Itens do pedido</strong>
+                            <strong>Itens da venda</strong>
                             <div class="item-row">
-                                <input id="cor" placeholder="Cor (ex.: azul)">
+                                <input id="cor" list="coresLista" autocomplete="off" placeholder="Cor (ex.: azul)">
                                 <input id="peso" inputmode="decimal" placeholder="Peso (kg) ex.: 3,50">
                                 <button id="btnAddItem" type="button" class="btn-primary" style="width: auto;">Adicionar</button>
                             </div>
                             <div id="itensWrap" style="margin-top:12px;"></div>
                         </div>
 
-                        <div class="form-group-checkbox">
+                        <div id="descontarWrap" class="form-group-checkbox">
                             <input type="checkbox" id="descontar_estoque" name="descontar_estoque" checked>
                             <label for="descontar_estoque">Descontar do estoque</label>
                         </div>
+                        <p id="tecidoOutroAviso" class="muted" hidden><small>Tecido fora do estoque: a venda não mexe no estoque.</small></p>
 
                         <div class="form-group-checkbox">
                             <input type="checkbox" id="fiado" name="fiado">
-                            <label for="fiado">Fiado (não pago)</label>
+                            <label for="fiado">Fiado (vai pagar depois)</label>
                         </div>
+                        <p id="fiadoAviso" class="msg erro" hidden><small>Venda fiado precisa de um cliente cadastrado: escolha um nome da lista.</small></p>
 
                         <div class="totals-card">
                             <div class="totals-row">
-                                <span class="muted">Total (auto):</span>
+                                <span class="muted">Total (peso × preço):</span>
                                 <strong id="totalPreview" class="pill">R$ 0,00</strong>
                             </div>
-                            <button type="submit" class="btn-primary">Salvar Pedido</button>
-                            <button type="submit" class="btn-secondary" data-orcamento="1">Salvar como orçamento</button>
-                            <p class="muted"><small>Orçamento <b>não baixa o estoque</b> e não entra nas vendas nem na comissão. O estoque só é descontado quando você converter o orçamento em pedido.</small></p>
+                            <button type="submit" class="btn-primary">Salvar</button>
                         </div>
                         <div id="msgPedido" class="msg"></div>
                     </form>
-
-                    <h3>Orçamentos</h3>
-                    <p class="muted"><small>Orçamentos em aberto (sem baixa de estoque). "Converter em pedido" desconta o estoque e congela a comissão com a taxa atual do vendedor.</small></p>
-                    <div id="orcamentosWrap" class="table-responsive"></div>
                 </section>
 
                 <!-- ====== Tela: Pedidos ====== -->
@@ -345,10 +350,9 @@
             <h2>Editar Pedido</h2>
             <form id="formEditPedido">
                 <div class="grid">
-                    <div class="form-group"><label>Cliente *<select id="editClienteId" name="cliente_id" required></select></label></div>
+                    <div class="form-group"><label>Cliente (opcional)<input id="editClienteNome" list="clientesLista" autocomplete="off" placeholder="Escolha da lista ou digite um nome"></label></div>
                     <div class="form-group"><label>Tecido *<input id="editTecido" name="tecido" required></label></div>
-                    <div class="form-group"><label>Preço unitário (R$/kg) *<input id="editPreco" name="preco_unitario" inputmode="decimal" required></label></div>
-                    <div class="form-group" style="grid-column: 1 / -1;"><label>Desconto (R$)<input id="editDesconto" name="desconto" type="text"></label></div>
+                    <div class="form-group"><label>Preço por kg (R$) *<input id="editPreco" name="preco_unitario" inputmode="decimal" required></label></div>
                 </div>
 
                 <div class="card-inset">
@@ -378,6 +382,6 @@
     </div>
 
     <noscript>Ative o JavaScript para usar o sistema.</noscript>
-    <script src="../js/script.js?v=34"></script>
+    <script src="../js/script.js?v=35"></script>
 </body>
 </html>

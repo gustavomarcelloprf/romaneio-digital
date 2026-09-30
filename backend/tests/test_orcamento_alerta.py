@@ -1,5 +1,5 @@
-# Testes do ORÇAMENTO que vira pedido (status em pedidos + POST
-# /pedidos/<id>/converter) e do ALERTA de estoque mínimo por cor.
+# Testes do ALERTA de estoque mínimo por cor. (O orçamento que vivia aqui foi
+# aposentado: a rota /converter não existe mais; ver test_venda_simplificada.py.)
 import os
 import sys
 from pathlib import Path
@@ -22,7 +22,7 @@ from app import app  # noqa: E402
 # Rate limit do /auth/login desligado só nos testes (a suíte loga muitas vezes).
 app_module.limiter.enabled = False
 
-LOJA = "Loja Orcamento"
+LOJA = "Loja Alerta"
 OUTRA = "Loja Vizinha"
 SENHA = "s3nh4-forte"
 
@@ -97,20 +97,8 @@ def _peso_azul(loja=LOJA):
     return row["peso_kg"]
 
 
-def _pedido_db(pedido_id):
-    conn = database.get_conn()
-    row = conn.execute(
-        "SELECT status, comissao_taxa, comissao_valor, total, descontar_estoque FROM pedidos WHERE id = %s",
-        (pedido_id,),
-    ).fetchone()
-    conn.close()
-    return dict(row)
-
-
-def _criar(c, cliente_id, itens, orcamento, descontar_estoque=True):
-    """R$ 10/kg; descontar_estoque=True por padrão (também no orçamento), para
-    provar que o orçamento não baixa nada na criação mesmo com a intenção
-    marcada — só a conversão respeita essa intenção depois."""
+def _vender(c, cliente_id, itens, descontar_estoque=True):
+    """Venda a R$ 10/kg."""
     return c.post(
         "/pedidos",
         json={
@@ -119,233 +107,12 @@ def _criar(c, cliente_id, itens, orcamento, descontar_estoque=True):
             "tecido": "Malha",
             "itens": itens,
             "descontar_estoque": descontar_estoque,
-            "is_orcamento": orcamento,
         },
     )
 
 
-def _orcamento(ctx, itens=None, cliente=None, descontar_estoque=True):
-    resp = _criar(
-        ctx[cliente or "op"], ctx["cliente_id"], itens or [{"cor": "Azul", "peso": "4"}], True, descontar_estoque
-    )
-    assert resp.status_code == 201, resp.get_json()
-    assert resp.get_json()["status"] == "orcamento"
-    return resp.get_json()["id"]
-
-
-def _tudo(c, rota):
-    # Período bem largo: data_iso é "agora", sempre cai dentro.
-    return c.get(f"{rota}?de=2000-01-01&ate=2999-12-31").get_json()
-
-
 # ---------------------------------------------------------------------------
-# A) Orçamento: não baixa estoque, não congela comissão, não entra em relatório
-# ---------------------------------------------------------------------------
-def test_orcamento_nao_debita_estoque_e_comissao_zero(ctx):
-    pid = _orcamento(ctx)
-    assert _peso_azul() == 10
-    p = _pedido_db(pid)
-    assert p["status"] == "orcamento"
-    assert p["comissao_valor"] == 0
-    assert p["total"] == 40
-
-
-def test_orcamento_nao_entra_nos_relatorios(ctx):
-    _orcamento(ctx)
-
-    loja = _tudo(ctx["admin"], "/api/relatorio/loja")
-    assert loja["num_pedidos"] == 0
-    assert loja["faturamento_total"] == 0
-    assert loja["comissoes_a_pagar"] == 0
-    assert loja["por_operador"] == []
-    assert loja["tecidos_mais_vendidos"] == []
-    # Orçamento não é venda: o tecido segue encalhado.
-    assert loja["tecidos_encalhados"] == ["Malha"]
-
-    meu = _tudo(ctx["op"], "/api/relatorio/meu")
-    assert meu["num_pedidos"] == 0
-    assert meu["faturamento"] == 0
-    assert meu["comissao"] == 0
-    assert meu["ultimos_pedidos"] == []
-
-
-def test_listagem_separa_orcamentos_de_pedidos(ctx):
-    oid = _orcamento(ctx)
-    pid = _criar(ctx["op"], ctx["cliente_id"], [{"cor": "Azul", "peso": "1"}], False).get_json()["id"]
-
-    pedidos = ctx["op"].get("/pedidos").get_json()
-    assert [p["id"] for p in pedidos] == [pid]
-    orcamentos = ctx["op"].get("/pedidos?status=orcamento").get_json()
-    assert [o["id"] for o in orcamentos] == [oid]
-    assert orcamentos[0]["status"] == "orcamento"
-
-
-def test_pedido_default_continua_debitando_e_congelando(ctx):
-    resp = _criar(ctx["op"], ctx["cliente_id"], [{"cor": "Azul", "peso": "4"}], False)
-    assert resp.status_code == 201
-    assert resp.get_json()["status"] == "pedido"
-    assert _peso_azul() == 6
-    p = _pedido_db(resp.get_json()["id"])
-    assert p["status"] == "pedido"
-    assert p["comissao_valor"] == 4.0  # 10% de R$ 40
-
-    # Sem is_orcamento no payload também é pedido (compatibilidade).
-    resp = ctx["op"].post("/pedidos", json={
-        "cliente_id": ctx["cliente_id"], "preco_unitario": "10,00", "tecido": "Malha",
-        "itens": [{"cor": "Azul", "peso": "1"}], "descontar_estoque": True,
-    })
-    assert resp.get_json()["status"] == "pedido"
-    assert _peso_azul() == 5
-
-
-# ---------------------------------------------------------------------------
-# B) Conversão orçamento -> pedido
-# ---------------------------------------------------------------------------
-def test_converter_debita_congela_taxa_atual_e_passa_a_contar(ctx):
-    pid = _orcamento(ctx)
-    # A taxa muda entre o orçamento e a conversão: vale a ATUAL.
-    assert ctx["admin"].put(f"/usuarios/{ctx['op_id']}", json={"taxa_comissao": "5"}).status_code == 200
-
-    resp = ctx["op"].post(f"/pedidos/{pid}/converter")
-    assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["status"] == "pedido"
-
-    assert _peso_azul() == 6
-    p = _pedido_db(pid)
-    assert p["status"] == "pedido"
-    assert p["comissao_taxa"] == 5
-    assert p["comissao_valor"] == 2.0  # 5% de R$ 40
-
-    loja = _tudo(ctx["admin"], "/api/relatorio/loja")
-    assert loja["num_pedidos"] == 1
-    assert loja["faturamento_total"] == 40
-    assert loja["comissoes_a_pagar"] == 2.0
-    assert loja["por_operador"][0]["nome"] == "Operador"
-    assert loja["tecidos_encalhados"] == []
-
-    meu = _tudo(ctx["op"], "/api/relatorio/meu")
-    assert meu["num_pedidos"] == 1
-    assert meu["comissao"] == 2.0
-
-    assert ctx["op"].get("/pedidos?status=orcamento").get_json() == []
-    assert [p["id"] for p in ctx["op"].get("/pedidos").get_json()] == [pid]
-
-
-def test_converter_comissao_e_do_vendedor_original_nao_de_quem_converte(ctx):
-    # Orçamento do operador (10%) convertido pelo admin (dono, taxa 0).
-    pid = _orcamento(ctx)
-    assert ctx["admin"].post(f"/pedidos/{pid}/converter").status_code == 200
-    assert _pedido_db(pid)["comissao_valor"] == 4.0
-
-
-def test_converter_sem_estoque_da_409_e_nao_muda_nada(ctx):
-    pid = _orcamento(ctx, itens=[{"cor": "Azul", "peso": "12"}])
-    resp = ctx["op"].post(f"/pedidos/{pid}/converter")
-    assert resp.status_code == 409
-    assert "insuficiente" in resp.get_json()["error"].lower()
-    assert _peso_azul() == 10
-    p = _pedido_db(pid)
-    assert p["status"] == "orcamento"
-    assert p["comissao_valor"] == 0
-
-
-def test_converter_e_atomico_com_varias_cores(ctx):
-    # Azul cabe, Verde não existe: nada pode ser baixado.
-    pid = _orcamento(ctx, itens=[{"cor": "Azul", "peso": "3"}, {"cor": "Verde", "peso": "1"}])
-    assert ctx["op"].post(f"/pedidos/{pid}/converter").status_code == 409
-    assert _peso_azul() == 10
-    assert _pedido_db(pid)["status"] == "orcamento"
-
-
-def test_converter_soma_linhas_da_mesma_cor(ctx):
-    pid = _orcamento(ctx, itens=[{"cor": "Azul", "peso": "6"}, {"cor": "Azul", "peso": "5"}])
-    assert ctx["op"].post(f"/pedidos/{pid}/converter").status_code == 409
-    assert _peso_azul() == 10
-
-
-def test_converter_duas_vezes_da_409_sem_baixar_de_novo(ctx):
-    pid = _orcamento(ctx)
-    assert ctx["op"].post(f"/pedidos/{pid}/converter").status_code == 200
-    assert ctx["op"].post(f"/pedidos/{pid}/converter").status_code == 409
-    assert _peso_azul() == 6
-
-
-def test_converter_pedido_normal_da_409(ctx):
-    pid = _criar(ctx["op"], ctx["cliente_id"], [{"cor": "Azul", "peso": "1"}], False).get_json()["id"]
-    assert ctx["op"].post(f"/pedidos/{pid}/converter").status_code == 409
-    assert _peso_azul() == 9
-
-
-# ---------------------------------------------------------------------------
-# B.1) Conversão respeita a intenção gravada (venda casada não baixa)
-# ---------------------------------------------------------------------------
-def test_converter_venda_casada_nao_baixa_e_sem_409(ctx):
-    # Peso muito acima do estoque e tecido inexistente: se tentasse baixar,
-    # daria 409. Com descontar_estoque=False, a conversão nem tenta.
-    pid = _orcamento(ctx, itens=[{"cor": "Azul", "peso": "999"}], descontar_estoque=False)
-    assert _pedido_db(pid)["descontar_estoque"] == 0
-
-    resp = ctx["op"].post(f"/pedidos/{pid}/converter")
-    assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["status"] == "pedido"
-    assert _peso_azul() == 10
-    assert _pedido_db(pid)["status"] == "pedido"
-
-
-def test_converter_venda_casada_com_tecido_nao_cadastrado(ctx):
-    pid = _orcamento(ctx, cliente="op", descontar_estoque=False)
-    # Corrige o tecido do orçamento para um que não existe no estoque.
-    conn = database.get_conn()
-    conn.execute("UPDATE pedidos SET tecido = 'Tecido Nao Rastreado' WHERE id = %s", (pid,))
-    conn.commit()
-    conn.close()
-
-    resp = ctx["op"].post(f"/pedidos/{pid}/converter")
-    assert resp.status_code == 200, resp.get_json()
-    assert _peso_azul() == 10
-
-
-def test_converter_com_descontar_true_baixa_e_da_409_se_faltar(ctx):
-    pid = _orcamento(ctx, descontar_estoque=True)
-    assert _pedido_db(pid)["descontar_estoque"] == 1
-    resp = ctx["op"].post(f"/pedidos/{pid}/converter")
-    assert resp.status_code == 200, resp.get_json()
-    assert _peso_azul() == 6
-
-    pid2 = _orcamento(ctx, itens=[{"cor": "Azul", "peso": "999"}], descontar_estoque=True)
-    resp2 = ctx["op"].post(f"/pedidos/{pid2}/converter")
-    assert resp2.status_code == 409
-    assert _peso_azul() == 6
-
-
-def test_coluna_descontar_estoque_persiste_pedido_e_orcamento(ctx):
-    pid_true = _criar(ctx["op"], ctx["cliente_id"], [{"cor": "Azul", "peso": "1"}], False, descontar_estoque=True).get_json()["id"]
-    assert _pedido_db(pid_true)["descontar_estoque"] == 1
-
-    pid_false = _criar(ctx["op"], ctx["cliente_id"], [{"cor": "Azul", "peso": "1"}], False, descontar_estoque=False).get_json()["id"]
-    assert _pedido_db(pid_false)["descontar_estoque"] == 0
-
-    oid_true = _orcamento(ctx, descontar_estoque=True)
-    assert _pedido_db(oid_true)["descontar_estoque"] == 1
-
-    oid_false = _orcamento(ctx, descontar_estoque=False)
-    assert _pedido_db(oid_false)["descontar_estoque"] == 0
-
-
-def test_converter_permissoes_e_isolamento(ctx):
-    pid = _orcamento(ctx)
-    assert ctx["anon"].post(f"/pedidos/{pid}/converter").status_code == 401
-    # Outra loja não enxerga o orçamento (nem baixa o estoque de ninguém).
-    assert ctx["outra_admin"].post(f"/pedidos/{pid}/converter").status_code == 404
-    assert _peso_azul() == 10
-    assert _peso_azul(OUTRA) == 10
-    assert ctx["op"].post("/pedidos/99999/converter").status_code == 404
-    # Todo papel vende, então todo papel converte.
-    assert ctx["gerente"].post(f"/pedidos/{pid}/converter").status_code == 200
-
-
-# ---------------------------------------------------------------------------
-# C) Estoque mínimo
+# A) Estoque mínimo
 # ---------------------------------------------------------------------------
 def _cor_api(c, nome="Azul"):
     estoque = c.get("/api/estoque").get_json()
@@ -373,20 +140,12 @@ def test_flag_de_minimo(ctx):
     assert _cor_api(ctx["op"])["abaixo_minimo"] is False
 
     # A venda leva o peso para baixo do mínimo: o alerta dispara.
-    _criar(ctx["op"], ctx["cliente_id"], [{"cor": "Azul", "peso": "1"}], False)
+    _vender(ctx["op"], ctx["cliente_id"], [{"cor": "Azul", "peso": "1"}])
     assert _cor_api(ctx["op"])["abaixo_minimo"] is True
 
     # Mínimo 0 desliga o alerta.
     assert _set_min(ctx["admin"], ctx["cor_id"], "0").status_code == 200
     assert _cor_api(ctx["op"])["abaixo_minimo"] is False
-
-
-def test_orcamento_nao_dispara_alerta_mas_conversao_sim(ctx):
-    _set_min(ctx["admin"], ctx["cor_id"], "7")
-    pid = _orcamento(ctx)
-    assert _cor_api(ctx["op"])["abaixo_minimo"] is False
-    ctx["op"].post(f"/pedidos/{pid}/converter")
-    assert _cor_api(ctx["op"])["abaixo_minimo"] is True
 
 
 def test_definir_minimo_permissoes_e_validacao(ctx):
@@ -402,7 +161,7 @@ def test_definir_minimo_permissoes_e_validacao(ctx):
 
 
 # ---------------------------------------------------------------------------
-# D) Migração de banco antigo
+# B) Migração de banco antigo
 # ---------------------------------------------------------------------------
 def test_init_db_migra_banco_sem_as_colunas_novas(banco_sem_schema):
     # Schema "antigo" montado à mão: pedidos e estoque_cores sem as colunas
@@ -427,4 +186,5 @@ def test_init_db_migra_banco_sem_as_colunas_novas(banco_sem_schema):
     assert conn.execute("SELECT status FROM pedidos").fetchone()["status"] == "pedido"
     assert conn.execute("SELECT estoque_minimo FROM estoque_cores").fetchone()["estoque_minimo"] == 0
     assert conn.execute("SELECT descontar_estoque FROM pedidos").fetchone()["descontar_estoque"] == 1
+    assert conn.execute("SELECT cliente_avulso FROM pedidos").fetchone()["cliente_avulso"] is None
     conn.close()
